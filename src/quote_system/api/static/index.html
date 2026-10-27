@@ -140,6 +140,21 @@ function render(q){
     <p class="small muted">Method: ${q.mode === 'parts_history' ? `parts match – ${q.matched_segments.toLocaleString()} past segments that used these parts${tot.overlap_basis ? ` (repairs combined using ${esc(tot.overlap_basis)}, × ${tot.overlap_factor})` : ''}` : q.mode === 'similar_history' ? `context match – ${q.matched_segments.toLocaleString()} past segments with the same meaning` : esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor && !tot.overlap_basis ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p>
     ${q.job_list_check ? `<p class="small muted">Job list check (${esc(q.job_list_check.display)}): P50 ${h(q.job_list_check.total.p50_hours)} h / P80 ${h(q.job_list_check.total.p80_hours)} h.</p>` : ''}
     ${q.context_check ? `<p class="small muted">Context check: ${q.context_check.matched_segments.toLocaleString()} past segments worded like this took P50 ${h(q.context_check.total.p50_hours)} h / P80 ${h(q.context_check.total.p80_hours)} h (${esc(q.context_check.level_used)} level, n=${q.context_check.sample_size}).</p>` : ''}</div>`;
+  if (q.suggested_descriptions && q.suggested_descriptions.length){
+    const [top, ...rest] = q.suggested_descriptions;
+    const alts = [...(top.same_job_also_written || []), ...rest.map(d => d.description)].filter((v, i, a) => v && a.indexOf(v) === i).slice(0, 6);
+    html += `<div class="card"><h2>Suggested job description</h2>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span id="sugg" style="font-size:18px;font-weight:600">${esc(top.description)}</span>
+        <button class="ghost" id="copySugg">Copy</button>
+        ${q.parts_query ? `<button class="ghost" data-use="${esc(top.description)}">Use &amp; re-quote</button>` : ''}
+      </div>
+      <p class="small muted">${top.segments ? `How ${top.segments.toLocaleString()} matching past jobs were written${top.on_this_model ? ` (${top.on_this_model} on ${esc(m.model)})` : ''}.` : 'Combined from the suggestion for each repair.'}</p>
+      ${alts.length ? `<p class="small muted" style="margin-bottom:4px">Also written as:</p><div class="chips">${alts.map(a => `<button data-copy="${esc(a)}">${esc(a)}</button>`).join('')}</div>` : ''}
+    </div>`;
+  } else if (q.parts_query) {
+    html += `<div class="card small muted">No consistent job description in the history for these parts – they are used on many different jobs.</div>`;
+  }
   if (q.parts_query){
     html += `<div class="card"><h2>Parts given</h2>${q.inferred_jobs.length ? `<p class="small muted">Main parts point to: ${q.inferred_jobs.map(j => esc(j.display_name)).join(' + ')}</p>` : ''}
       <div class="scroll"><table><tr><th>Part</th><th>Desc</th><th>Role</th><th>Repair</th><th class="num">Past segments</th></tr>` +
@@ -185,6 +200,13 @@ function render(q){
     <input id="act" type="number" min="0" step="0.25" placeholder="actual hours"><button class="ghost" id="saveAct">Save</button></div><p id="actMsg" class="small muted"></p></div>`;
   $('#out').innerHTML = html;
   wireJobButtons();
+  const copy = txt => { try { navigator.clipboard.writeText(txt); } catch (e) {} };
+  const cs = $('#copySugg'); if (cs) cs.onclick = () => { copy($('#sugg').textContent); cs.textContent = 'Copied'; };
+  $('#out').querySelectorAll('button[data-copy]').forEach(b => b.onclick = () => { copy(b.dataset.copy); b.textContent = 'Copied: ' + b.dataset.copy; });
+  $('#out').querySelectorAll('button[data-use]').forEach(b => b.onclick = () => {
+    $('#job').value = b.dataset.use;
+    quote({job_text: b.dataset.use, part_numbers: q.parts_query.map(p => p.part_number)});
+  });
   $('#saveAct').onclick = async () => {
     const v = parseFloat($('#act').value);
     if (isNaN(v)) { $('#actMsg').textContent = 'Enter hours first'; return; }

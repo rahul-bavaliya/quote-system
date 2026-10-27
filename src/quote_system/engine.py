@@ -57,6 +57,18 @@ def _wquantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
     return float(np.interp(q, cw, v))
 
 
+def _join_descriptions(descs: list[str]) -> str:
+    """'REPLACE BATTERY' + 'REPLACE STARTER' -> 'REPLACE BATTERY & STARTER'."""
+    descs = [d for d in descs if d]
+    if not descs:
+        return ""
+    verbs = {d.split()[0] for d in descs}
+    if len(verbs) == 1 and all(len(d.split()) > 1 for d in descs):
+        v = verbs.pop()
+        return v + " " + " & ".join(d.split(" ", 1)[1] for d in descs)
+    return " & ".join(descs)
+
+
 class EngineNotReady(RuntimeError):
     pass
 
@@ -377,8 +389,10 @@ class QuoteEngine:
         out = self._pool_quote(rows, weights, m, include_parts, text.strip(), best)
         if out is None:
             return None
+        model_rows = out.pop("_model_rows")
+        out["suggested_descriptions"] = self.suggest_descriptions(rows, model_rows)
         model_counts: dict[str, int] = {}
-        for r in out.pop("_model_rows"):
+        for r in model_rows:
             model_counts[r[6]] = model_counts.get(r[6], 0) + 1
         out["matched_descriptions"] = sorted(
             ({"description": t, "score": sc, "segments": n, "on_this_model": model_counts.get(t, 0)} for t, sc, n in matches),
@@ -465,6 +479,11 @@ class QuoteEngine:
             "parts": [p for _, sub in subs for p in sub["parts"]], "parts_included": include_parts,
             "matched_segments": sum(sub["matched_segments"] for _, sub in subs),
             "matched_descriptions": [d for _, sub in subs for d in sub["matched_descriptions"][:8]],
+            "suggested_descriptions": ([{"description": _join_descriptions([sub["suggested_descriptions"][0]["description"]
+                                                                            for _, sub in subs if sub["suggested_descriptions"]]),
+                                         "segments": None, "on_this_model": None, "wordings": None, "combined": True,
+                                         "same_job_also_written": []}]
+                                       + [d for _, sub in subs for d in sub["suggested_descriptions"][:2]]),
             "similar_work_orders": [w for _, sub in subs for w in sub["similar_work_orders"][:4]],
             "parts_query": known, "unknown_parts": unknown,
             "inferred_jobs": [{"job_code": c, "display_name": self.catalog.get(c, {}).get("display_name", c)} for c, _ in subs],
@@ -507,6 +526,7 @@ class QuoteEngine:
         if out is None:
             return None
         model_rows = out.pop("_model_rows")
+        out["suggested_descriptions"] = self.suggest_descriptions(rows, model_rows)
         # what were these parts used for? most common descriptions in the matched history
         desc_n: dict[str, int] = {}
         for r in rows:
@@ -527,6 +547,56 @@ class QuoteEngine:
         if all(k_["role"] in ("consumable", "fee", "hardware", "core") for k_ in known):
             out["warnings"].insert(0, "Only consumables/hardware given - they are used on many different jobs, "
                                       "so add the main part or a job description for a tighter quote.")
+        return out
+
+    # ------------------------------------------------------------------ suggested quote description
+    _NOISE_RE = re.compile(r"WARRANTY|INVOICE|\bSEE\b|\bSEG\b|SEGMENT|\bPO\b|QUOTE|REPORT|^\W*$")
+    _ACTION_RE = re.compile(r"REPLAC|R ?& ?R|INSTALL|REBUILD|RESEAL|ADJUST|\bSET\b|OVERHAUL|CHANGE|REMPLAC|AJUST|SERVICE|PROGRAM")
+    _SYMPTOM_ONLY_RE = re.compile(r"^(D/R |DIAG\w*|CHECK|INSPECT\w*|INVESTIGAT\w*|TROUBLESHOOT\w*|REPAIR FOR|VERIFIER)")
+
+    def suggest_descriptions(self, rows: list, model_rows: list, limit: int = 4) -> list[dict]:
+        """Group past descriptions that mean the same thing and suggest the clearest common wording,
+        preferring ones that name the repair ('REPLACE BATTERY') over symptoms ('D/R NO START')."""
+        from .textsearch import tokens
+
+        groups: dict[tuple, dict] = {}
+        on_model = {r[0] for r in model_rows}
+        for r in rows:
+            raw = re.sub(r"\s+", " ", (r[5] or "").strip().upper()).strip(" .-")
+            if not raw:
+                continue
+            key = tuple(sorted(set(tokens(raw))))
+            if not key:
+                continue
+            g = groups.setdefault(key, {"n": 0, "model_n": 0, "variants": {}})
+            g["n"] += 1
+            g["model_n"] += r[0] in on_model
+            g["variants"][raw] = g["variants"].get(raw, 0) + 1
+        scored = []
+        for key, g in groups.items():
+            text = max(g["variants"].items(), key=lambda x: (x[1], -len(x[0])))[0]
+            score = g["n"] + 2 * g["model_n"]
+            if not self._ACTION_RE.search(text):
+                score *= 0.1 if symptoms_from_text(text, self.settings.config_dir) else 0.4
+            if self._SYMPTOM_ONLY_RE.search(text):
+                score *= 0.5
+            if self._NOISE_RE.search(text) or len(text) > 60:
+                score *= 0.2
+            scored.append((score, text, g))
+        scored.sort(key=lambda x: -x[0])
+        clean = lambda v: not self._NOISE_RE.search(v) and not re.search(r"[A-Z0-9]*\d[A-Z0-9]*[A-Z][A-Z0-9]*\d{4,}", v) \
+            and len(v) <= 60
+        out = []
+        for _, t, g in scored:
+            if g["n"] < 2 and out:
+                continue  # one-off wordings are not worth suggesting
+            alts = [v for v, c in sorted(g["variants"].items(), key=lambda x: -x[1]) if v != t and c >= 2 and clean(v)][:3]
+            out.append({"description": t, "segments": g["n"], "on_this_model": g["model_n"],
+                        "wordings": len(g["variants"]), "same_job_also_written": alts})
+            if len(out) >= limit:
+                break
+        if out and out[0]["segments"] < 2:
+            return []
         return out
 
     # ------------------------------------------------------------------ shared: quote from a pool of past segments

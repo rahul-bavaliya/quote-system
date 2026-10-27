@@ -63,6 +63,7 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
   - Core returns (`CR…`) follow their part.
   - Unknown part numbers are listed and ignored.
   - Adding `job_text` as well narrows the match.
+  - **Suggested job description:** `suggested_descriptions` gives the most common wording of the matched past jobs. Wordings that name the repair ("REPLACE BATTERY") are preferred over symptoms ("D/R NO START"); one-off and warranty/invoice notes are dropped. Other common wordings of the same job are listed too. For two repairs it combines them ("REPLACE BATTERY & STARTER"). On the page you can **Copy** it or **Use & re-quote**.
 * `include_parts: false` covers customer-supplied parts. Labour is unchanged and the kit is dropped.
 * **Symptoms.** `"machine not starting"` is quoted from past no-start calls, and the response also includes a diagnosis: on similar machines, what share of no-start segments were fixed by a battery, a starter, a fuel pump …, and how many had no part-identified fix. Each fix has its own hours and can be quoted with one click on the page.
 * Every quote is saved (`data/quotes.sqlite`). Record what the job really took with `POST /quotes/{id}/actual`. `GET /accuracy` tracks how quotes compare with actuals.

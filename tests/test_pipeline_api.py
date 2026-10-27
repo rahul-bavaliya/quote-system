@@ -152,3 +152,14 @@ def test_parts_edge_cases(client):
     assert q["mode"] == "parts_history" and q["total"]["p50_hours"] > 2
     lk = client.get("/parts/lookup", params={"part_numbers": "TY25879B, nope9"}).json()
     assert lk["known"][0]["component"] == "BATTERY" and lk["unknown"] == ["nope9"]
+
+
+def test_parts_quote_suggests_description(client):
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "part_numbers": ["TY25879B"]}).json()
+    top = q["suggested_descriptions"][0]["description"]
+    assert "BATTER" in top and "START" not in top
+    q = client.post("/quotes", json={"make": "JD", "model": "544P", "part_numbers": ["TY25879B", "SE501406"]}).json()
+    combined = q["suggested_descriptions"][0]
+    assert combined.get("combined") and "BATTER" in combined["description"] and "STARTER" in combined["description"]
+    q = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "valve lash adjustment"}).json()
+    assert q["suggested_descriptions"][0]["segments"] > 10
