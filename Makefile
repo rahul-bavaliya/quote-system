@@ -1,4 +1,4 @@
-.PHONY: help install pipeline run dev test backtest sample demo clean check-data
+.PHONY: help install deps pipeline run dev test backtest sample demo clean check-data
 
 PY ?= python
 PORT ?= 8000
@@ -14,26 +14,31 @@ help:
 install:
 	$(PY) -m pip install -e ".[dev]"
 
+# installs the package only if it is missing (e.g. the Codespace setup step did not run)
+deps:
+	@$(PY) -c "import quote_system, duckdb, fastexcel, fastapi, uvicorn" 2>/dev/null || \
+		(echo "Installing quote_system and dependencies..." && $(PY) -m pip install -q -e ".[dev]")
+
 check-data:
 	@ls data/raw/workorder* >/dev/null 2>&1 || (echo "\n  Put workorders.xlsx (or .csv) in data/raw/ first - see README\n" && exit 1)
 	@ls data/raw/part* >/dev/null 2>&1 || (echo "\n  Put parts.xlsx (or .csv) in data/raw/ first - see README\n" && exit 1)
 
-pipeline: check-data
+pipeline: deps check-data
 	$(PY) -m quote_system.pipeline
 
-run:
+run: deps
 	$(PY) -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT)
 
-dev:
+dev: deps
 	$(PY) -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT) --reload
 
-test:
+test: deps
 	$(PY) -m pytest -q
 
-backtest:
+backtest: deps
 	$(PY) -m quote_system.backtest --cutoff 2026-01-01
 
-sample:
+sample: deps
 	$(PY) -m quote_system.sample_data data/raw-sample
 
 demo: sample

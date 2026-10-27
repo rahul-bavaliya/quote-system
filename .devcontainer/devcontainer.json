@@ -3,6 +3,7 @@
   "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
   "hostRequirements": { "cpus": 2, "memory": "8gb" },
   "postCreateCommand": "pip install --upgrade pip && pip install -e '.[dev]'",
+  "postStartCommand": "make deps",
   "forwardPorts": [8000],
   "portsAttributes": { "8000": { "label": "Quote API", "onAutoForward": "openBrowser" } },
   "customizations": {
