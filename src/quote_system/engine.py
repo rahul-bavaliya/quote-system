@@ -407,21 +407,16 @@ class QuoteEngine:
                 "note": "not enough single-job history on this make/model to build a parts kit"}
 
     # ------------------------------------------------------------------ evidence
-    def similar(self, job_key: str, m: Machine, limit: int = 5) -> list[dict]:
-        c = self.cursor()
-        for col, val in (("model", m.model), ("series", m.series), ("base_model", m.base_model),
-                         ("model", [md for md, _ in m.neighbors])):
-            rows = c.execute(f"""
-                select service_order_id, wo_number, wo_segment, branch, invoice_date, description, actual_hours, eq_hours,
-                       coalesce(model_raw, model), location
-                from segments where job_key = ? and make = ? and {col} {"in (select unnest(?))" if isinstance(val, list) else "= ?"}
-                  and status = 'Invoiced' and actual_hours > 0
-                order by invoice_date desc limit ?""", [job_key, m.make, val, limit]).fetchall()
-            if rows:
-                return [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
-                         "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[6],
-                         "eq_hours": r[7], "model": r[8], "location": r[9]} for r in rows]
-        return []
+    def similar(self, job_key: str, m: Machine, limit: int = 8) -> list[dict]:
+        """Recent past work orders for this job on the searched model only (any spelling of it)."""
+        rows = self.cursor().execute("""
+            select service_order_id, wo_number, wo_segment, branch, invoice_date, description, actual_hours, eq_hours,
+                   coalesce(model_raw, model), location
+            from segments where job_key = ? and make = ? and model = ? and status = 'Invoiced' and actual_hours > 0
+            order by invoice_date desc limit ?""", [job_key, m.make, m.model, limit]).fetchall()
+        return [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
+                 "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[6],
+                 "eq_hours": r[7], "model": r[8], "location": r[9]} for r in rows]
 
     # ------------------------------------------------------------------ resolution / search
     def resolve_jobs(self, text: str) -> list[str]:
@@ -692,7 +687,8 @@ class QuoteEngine:
                                          "segments": None, "on_this_model": None, "wordings": None, "combined": True,
                                          "same_job_also_written": []}]
                                        + [d for _, sub in subs for d in sub["suggested_descriptions"][:2]]),
-            "similar_work_orders": [w for _, sub in subs for w in sub["similar_work_orders"][:4]],
+            "similar_work_orders": sorted((w for _, sub in subs for w in sub["similar_work_orders"]),
+                                          key=lambda w: w["invoice_date"], reverse=True)[:8],
             "parts_query": known, "unknown_parts": unknown,
             "inferred_jobs": [{"job_code": c, "display_name": self.catalog.get(c, {}).get("display_name", c)} for c, _ in subs],
             "warnings": warnings + [w for _, sub in subs for w in sub["warnings"]],
@@ -905,7 +901,8 @@ class QuoteEngine:
                      if len(level_rows.get(lvl, [])) >= self.settings.kit_min_segments), None) \
             or next(iter(reversed(list(level_rows))))
         pool = level_rows[spec]
-        recent = sorted(pool, key=lambda r: (round(weights.get(r[0], 0), 3), r[4]), reverse=True)[:8]
+        # evidence: the searched model only (hours above may still borrow from similar machines)
+        recent = sorted(level_rows.get("model", []), key=lambda r: (round(weights.get(r[0], 0), 3), r[4]), reverse=True)[:8]
         evidence = [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
                      "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[11], "eq_hours": r[12],
                      "model": r[15] or r[8], "location": LOCATIONS.get(r[14]),

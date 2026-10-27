@@ -230,8 +230,10 @@ function render(q){
   } else {
     html += '<div class="card small muted">Parts excluded (customer-supplied). Labour is unchanged.</div>';
   }
-  if (q.similar_work_orders.length){
-    html += `<div class="card"><h2>Recent similar work orders</h2><div class="scroll"><table><tr><th>WO-Seg</th><th>Date</th><th>Branch</th><th>Description</th><th class="num">Actual</th><th class="num">EQ</th></tr>` +
+  if (!q.similar_work_orders.length){
+    html += `<div class="card"><h2>Recent similar work orders on ${esc(m.model)}</h2><p class="small muted">No past work orders for this job on a ${esc(m.make)} ${esc(m.model)}. The hours above come from ${(m.similar_machines || []).length ? 'similar machines and ' : ''}wider history (see “Based on”).</p></div>`;
+  } else {
+    html += `<div class="card"><h2>Recent similar work orders on ${esc(m.model)}</h2><div class="scroll"><table><tr><th>WO-Seg</th><th>Date</th><th>Branch</th><th>Description</th><th class="num">Actual</th><th class="num">EQ</th></tr>` +
       q.similar_work_orders.map(w => `<tr><td>${w.wo_number}-${w.segment}</td><td>${esc(w.invoice_date)}</td><td>${esc(w.branch)}</td>
       <td>${esc(w.description)} <span class="muted small">${esc(w.model)}${w.location ? ' · ' + esc(w.location) : ''}${w.match_score != null ? ' · ' + Math.round(w.match_score*100) + '% match' : ''}</span></td><td class="num">${h(w.actual_hours)}</td><td class="num">${h(w.eq_hours)}</td></tr>`).join('') + '</table></div></div>';
   }

@@ -276,3 +276,15 @@ def test_class_factor_is_bounded(built):
     m = e.machine("JD", "333G")
     cf = e.class_factor(m, "make_div", ["BATTERY"])
     assert cf is None or 0.3 <= cf["factor"] <= 3.0
+
+
+def test_work_orders_shown_only_for_searched_model(client):
+    from quote_system.normalize import model_key
+
+    for body in ({"job_codes": ["BATTERY"]}, {"job_text": "valve lash adjustment"}, {"part_numbers": ["TY25879B", "SE501406"]}):
+        q = client.post("/quotes", json={"make": "JD", "model": "333 G", **body}).json()
+        assert q["similar_work_orders"], body
+        assert {model_key(w["model"]) for w in q["similar_work_orders"]} == {"333G"}, body
+    # a model with no history shows no other machines' work orders (hours still come from similar machines)
+    q = client.post("/quotes", json={"make": "JD", "model": "333X", "job_codes": ["STARTER"]}).json()
+    assert q["similar_work_orders"] == [] and q["total"]["p50_hours"] > 0
