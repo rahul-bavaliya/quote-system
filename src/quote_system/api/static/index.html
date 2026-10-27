@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Service Quote</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--ink:#1d1d1b;--muted:#6b6a64;--line:#e3e1d9;--accent:#367c2b;--accent-ink:#fff;--warn-bg:#fdf3dc;--warn:#7a5306;--err:#a32d2d;--chip:#eef4ea}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--card:#21211e;--ink:#ecebe6;--muted:#a3a198;--line:#34332f;--accent:#7fbf6a;--accent-ink:#10200b;--warn-bg:#3a2e12;--warn:#f1d08a;--err:#f09595;--chip:#25331f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{font-size:18px;margin:0;font-weight:600}.sub{color:var(--muted);font-size:13px}
+main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+form{display:grid;grid-template-columns:110px 160px 1fr auto auto;gap:10px;align-items:end}
+@media (max-width:760px){form{grid-template-columns:1fr 1fr}form .wide{grid-column:1/-1}}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
+button{padding:9px 16px;border:0;border-radius:7px;background:var(--accent);color:var(--accent-ink);font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line);font-weight:500}
+.chk{display:flex;gap:6px;align-items:center;white-space:nowrap;padding-bottom:9px}.chk input{width:auto}
+.big{display:flex;gap:28px;flex-wrap:wrap;align-items:baseline}.big .n{font-size:34px;font-weight:650;font-variant-numeric:tabular-nums}
+.big .l{font-size:12px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:500}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+h2{font-size:15px;margin:0 0 10px}.muted{color:var(--muted)}.small{font-size:12px}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--chip)}
+.pill.low{background:var(--warn-bg);color:var(--warn)}
+.warn{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:14px}
+.err{color:var(--err)}.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.chips button{background:var(--chip);color:var(--ink);font-weight:500}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+.hidden{display:none}.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+</style>
+</head>
+<body>
+<header><h1>Service quote</h1><span class="sub" id="dataInfo">loading…</span></header>
+<main>
+  <div class="card">
+    <form id="f" autocomplete="off">
+      <div><label for="make">Make</label><input id="make" list="makes" value="JD" required></div>
+      <div><label for="model">Model</label><input id="model" list="models" placeholder="333G" required></div>
+      <div class="wide"><label for="job">Job (free text or pick)</label><input id="job" list="jobs" placeholder="replace battery, starter R&amp;R, 500 hour service, machine not starting…" required></div>
+      <label class="chk"><input type="checkbox" id="parts" checked> include parts</label>
+      <button type="submit">Quote</button>
+    </form>
+    <datalist id="makes"></datalist><datalist id="models"></datalist><datalist id="jobs"></datalist>
+    <p id="msg" class="small err"></p>
+  </div>
+  <div id="out"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const h = v => v == null ? '–' : Number(v).toFixed(1);
+async function api(path, opts){const r = await fetch(path, opts); const body = await r.json().catch(()=>({})); return {ok:r.ok, status:r.status, body};}
+
+async function init(){
+  const hl = await api('/health');
+  $('#dataInfo').textContent = hl.body.status === 'ok'
+    ? `${hl.body.data.segments.toLocaleString()} segments · ${hl.body.data.data_from} → ${hl.body.data.data_to}`
+    : 'No data loaded – run make pipeline';
+  if (hl.body.status !== 'ok') return;
+  const mk = await api('/makes');
+  $('#makes').innerHTML = mk.body.slice(0,100).map(m => `<option value="${esc(m.make)}">`).join('');
+  const jb = await api('/jobs?limit=100');
+  $('#jobs').innerHTML = jb.body.map(j => `<option value="${esc(j.display_name)}">`).join('');
+}
+let t;
+$('#model').addEventListener('input', () => { clearTimeout(t); t = setTimeout(async () => {
+  const r = await api(`/models?make=${encodeURIComponent($('#make').value)}&q=${encodeURIComponent($('#model').value)}&limit=30`);
+  if (r.ok) $('#models').innerHTML = r.body.map(m => `<option value="${esc(m.model)}">${m.segments} segments</option>`).join('');
+}, 200); });
+
+$('#f').addEventListener('submit', e => { e.preventDefault(); quote({job_text: $('#job').value}); });
+
+async function quote(jobSpec){
+  $('#msg').textContent = ''; $('#out').innerHTML = '<p class="muted">Quoting…</p>';
+  const body = {make: $('#make').value, model: $('#model').value, include_parts: $('#parts').checked, ...jobSpec};
+  // the datalist inserts display names: map them back to codes
+  if (body.job_text) {
+    const jb = await api('/jobs?limit=100');
+    const hit = jb.body.find(j => j.display_name.toLowerCase() === body.job_text.toLowerCase());
+    if (hit) { body.job_codes = [hit.job_code]; delete body.job_text; }
+  }
+  const r = await api('/quotes', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) return showError(r);
+  render(r.body);
+}
+
+function showError(r){
+  const d = r.body.detail;
+  if (typeof d !== 'object' || !d) { $('#out').innerHTML = ''; $('#msg').textContent = typeof d === 'string' ? d : `Error ${r.status}`; return; }
+  let html = `<div class="card"><h2>${esc(d.error || 'Could not quote')}</h2>`;
+  if (d.diagnosis && d.diagnosis.likely_fixes.length){
+    const dg = d.diagnosis;
+    html += `<p class="small muted">This reads like a symptom (${esc(dg.symptom)}). On ${dg.segments_with_symptom} similar segments (${esc(dg.level_used)} level) the fix was:</p>
+      <div class="scroll"><table><tr><th>Fix</th><th class="num">Share</th><th class="num">P50 h</th><th class="num">P80 h</th><th></th></tr>` +
+      dg.likely_fixes.map(f => `<tr><td>${f.jobs.length ? esc(f.display_name) : `<span class="muted">${esc(f.display_name)}</span>`}</td>
+        <td class="num">${(f.share*100).toFixed(0)}%</td><td class="num">${h(f.p50_hours)}</td><td class="num">${h(f.p80_hours)}</td>
+        <td>${f.jobs.length ? `<button class="ghost" data-jobs='${JSON.stringify(f.jobs)}'>Quote</button>` : ''}</td></tr>`).join('') + '</table></div>';
+  }
+  if (d.suggestions && d.suggestions.length){
+    html += `<p class="small muted" style="margin-top:14px">Or pick a job:</p><div class="chips">` +
+      d.suggestions.map(s => `<button data-jobs='${JSON.stringify([s.job_code])}'>${esc(s.display_name)}</button>`).join('') + '</div>';
+  }
+  $('#out').innerHTML = html + '</div>';
+  $('#out').querySelectorAll('button[data-jobs]').forEach(b => b.onclick = () => quote({job_codes: JSON.parse(b.dataset.jobs)}));
+}
+
+function render(q){
+  const tot = q.total || {};
+  const m = q.machine;
+  let html = (q.warnings||[]).map(w => `<div class="warn">${esc(w)}</div>`).join('');
+  html += `<div class="card"><div class="muted small">${esc(m.make)} ${esc(m.model)} · ${esc(m.division || '')} · quote ${esc(q.quote_id)}</div>
+    <h2 style="margin-top:4px">${q.labor.map(l => esc(l.display_name)).join(' + ')}</h2>
+    <div class="big"><div><div class="n">${h(tot.p50_hours)} h</div><div class="l">typical (P50)</div></div>
+    <div><div class="n">${h(tot.p80_hours)} h</div><div class="l">safe quote (P80)</div></div>
+    <div><div class="n" style="font-size:20px">${h(tot.p25_hours)}–${h(tot.p90_hours)} h</div><div class="l">P25–P90 range</div></div></div>
+    <p class="small muted">Method: ${esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p></div>`;
+
+  html += `<div class="card"><h2>Labour by job</h2><div class="scroll"><table><tr><th>Job</th><th class="num">P50</th><th class="num">P80</th><th>Based on</th><th>Confidence</th><th class="num">EQ hrs (hist.)</th></tr>` +
+    q.labor.map(l => `<tr><td>${esc(l.display_name)}</td><td class="num">${h(l.p50_hours)}</td><td class="num">${h(l.p80_hours)}</td>
+      <td class="small">${esc(l.level_used)} · n=${l.sample_size}<br><span class="muted">${l.basis.map(b => `${b.level} ${b.n}`).join(' · ')}</span></td>
+      <td><span class="pill ${l.confidence==='low'?'low':''}">${esc(l.confidence)}</span></td>
+      <td class="num">${l.historical_eq_hours ? h(l.historical_eq_hours.p50) : '–'}</td></tr>`).join('') + '</table></div></div>';
+
+  if (q.parts_included){
+    html += '<div class="grid2">';
+    for (const k of q.parts){
+      const rows = (list, tag) => list.map(p => `<tr><td>${esc(p.part_number)}</td><td>${esc(p.description)}</td>
+        <td class="small muted">${esc(p.role)}</td><td class="num">${p.qty ?? ''}</td><td class="num">${(p.attach_rate*100).toFixed(0)}%</td></tr>`).join('');
+      html += `<div class="card"><h2>Parts – ${esc(k.job_code)}</h2>` + (k.level_used
+        ? `<p class="small muted">From ${k.segments} single-job segments at ${esc(k.level_used)} level. % = share of those jobs that used the part.</p>
+           <div class="scroll"><table><tr><th>Part</th><th>Desc</th><th>Role</th><th class="num">Qty</th><th class="num">Used</th></tr>${rows(k.kit)}
+           ${k.optional.length ? `<tr><td colspan="5" class="small muted" style="padding-top:12px">Sometimes needed</td></tr>${rows(k.optional)}` : ''}</table></div>
+           ${!k.kit.length && !k.optional.length ? '<p class="small muted">No part is used consistently on this job.</p>' : ''}`
+        : `<p class="small muted">${esc(k.note)}</p>`) + '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="card small muted">Parts excluded (customer-supplied). Labour is unchanged.</div>';
+  }
+  if (q.similar_work_orders.length){
+    html += `<div class="card"><h2>Recent similar work orders</h2><div class="scroll"><table><tr><th>WO-Seg</th><th>Date</th><th>Branch</th><th>Description</th><th class="num">Actual</th><th class="num">EQ</th></tr>` +
+      q.similar_work_orders.map(w => `<tr><td>${w.wo_number}-${w.segment}</td><td>${esc(w.invoice_date)}</td><td>${esc(w.branch)}</td>
+      <td>${esc(w.description)} <span class="muted small">${esc(w.model)}</span></td><td class="num">${h(w.actual_hours)}</td><td class="num">${h(w.eq_hours)}</td></tr>`).join('') + '</table></div></div>';
+  }
+  html += `<div class="card"><h2>Record actual hours</h2><div style="display:flex;gap:8px;max-width:420px">
+    <input id="act" type="number" min="0" step="0.25" placeholder="actual hours"><button class="ghost" id="saveAct">Save</button></div><p id="actMsg" class="small muted"></p></div>`;
+  $('#out').innerHTML = html;
+  $('#saveAct').onclick = async () => {
+    const v = parseFloat($('#act').value);
+    if (isNaN(v)) { $('#actMsg').textContent = 'Enter hours first'; return; }
+    const r = await api(`/quotes/${q.quote_id}/actual`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({actual_hours: v})});
+    $('#actMsg').textContent = r.ok ? 'Saved.' : 'Could not save.';
+  };
+}
+init();
+</script>
+</body>
+</html>

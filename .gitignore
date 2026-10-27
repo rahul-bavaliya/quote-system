@@ -1,0 +1,18 @@
+# company data never goes to git
+data/*
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+*.xlsx
+*.csv
+!config/*.csv
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.sqlite
+
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+.env

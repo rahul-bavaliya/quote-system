@@ -1,0 +1,44 @@
+job_code,display_name,category,text_pattern,text_exclude,evidence_pattern,synonyms
+BATTERY,Battery R&R,component,\bBATTER(Y|IES|IE|IES)\b|\bBATT\b|\bBATTS\b,DISCONNECT|WATERING|CHARGER|CABLE|BOX|TRAY|CHECK|TEST|ISOLATOR|SWITCH|MASTER,BATTER|BATT\b|NO START|NOT START|WON'?T START|DEAD|BOOST|NOT CHARG|DEMARRE,battery;batteries;batterie;replace battery;new battery
+STARTER,Starter R&R,component,STARTER|STARTING MOTOR|CRANKING MOTOR|DEMARREUR,RELAY|SWITCH|BUTTON,STARTER|DEMARREUR|NO START|NOT START|WON'?T START|NO CRANK|CRANK|DEMARRE|STARTING,starter;starter motor;cranking motor;demarreur
+ALTERNATOR,Alternator R&R,component,ALTERNAT,,ALTERNAT|NOT CHARG|NO CHARG|CHARGING|VOLT|BATTERY LIGHT,alternator;alternateur;charging
+TURBOCHARGER,Turbocharger R&R,component,\bTURBO,,TURBO|BOOST|LOW POWER|SMOKE|DERATE,turbo;turbocharger
+WATER_PUMP,Water pump R&R,component,WATER PUMP|POMPE A EAU|COOLANT PUMP,,WATER PUMP|COOLANT|OVERHEAT|LEAK|POMPE A EAU,water pump;coolant pump
+FUEL_PUMP,Fuel pump R&R,component,FUEL PUMP|LIFT PUMP|TRANSFER PUMP|INJECTION PUMP|POMPE A CARBURANT|HIGH PRESSURE PUMP,,FUEL|PUMP|NO START|LOW POWER|STALL,fuel pump;lift pump;transfer pump;injection pump
+FUEL_INJECTOR,Fuel injector R&R,component,INJECTOR|INJECTEUR,,INJECT|MISFIRE|SMOKE|LOW POWER|KNOCK,injector;injectors;fuel injector
+HYD_PUMP,Hydraulic pump R&R,component,HYD(RAULIC)? PUMP|PISTON PUMP|GEAR PUMP|MAIN PUMP|POMPE HYD,,PUMP|HYD|POMPE,hydraulic pump;main pump;piston pump
+HYD_MOTOR,Hydraulic motor R&R,component,SWING MOTOR|TRAVEL MOTOR|HYD(RAULIC)? MOTOR|DRIVE MOTOR,,MOTOR|SWING|TRAVEL|HYD,swing motor;travel motor;hydraulic motor
+HYD_CYLINDER,Hydraulic cylinder reseal/R&R,component,CYLINDER|CYLINDRE|RESEAL|RE-SEAL,HEAD GASKET|CYLINDER HEAD|ENGINE,CYL|RESEAL|SEAL|LEAK|DRIFT,cylinder;reseal cylinder;cylinder reseal;boom cylinder;bucket cylinder
+HOSE,Hose R&R,component,\bHOSES?\b|BOYAU|FLEXIBLE,,HOSE|LEAK|BOYAU|FUITE|BURST|BLOWN,hose;hydraulic hose;replace hose;blown hose
+RADIATOR,Radiator R&R,component,RADIAT,,RADIAT|COOL|OVERHEAT|LEAK,radiator;radiateur
+AC_COMPRESSOR,A/C compressor R&R,component,(A/?C|AIR COND|CLIM).*COMPRESS|COMPRESSOR,AIR COMPRESSOR,COMPRESS|A/?C|AIR COND|COOLING|CLIM,ac compressor;a/c compressor;air conditioning compressor
+WIRING_HARNESS,Wiring harness repair/R&R,component,HARNESS|WIRING|FAISCEAU,,HARNESS|WIRING|WIRE|ELECTRICAL|FAISCEAU,wiring harness;harness;wiring
+THERMOSTAT,Thermostat R&R,component,THERMOSTAT,,THERMOSTAT|OVERHEAT|COOL|TEMP,thermostat
+DEF_DOSER,DEF doser R&R,component,DOSER|DOSING|DEF INJECTOR,,DOSER|DOSING|DEF|AFTERTREATMENT|DERATE|CODE,def doser;doser;dosing module
+DPF,DPF / DOC R&R,component,\bDPF\b|\bDOC\b|PARTICULATE,,DPF|DOC|AFTERTREATMENT|REGEN|DERATE|EXHAUST,dpf;diesel particulate filter;doc
+EGR,EGR valve/cooler R&R,component,\bEGR\b,,EGR|DERATE|CODE|SMOKE,egr;egr valve;egr cooler
+EXHAUST,Exhaust / muffler R&R,component,MUFFLER|EXHAUST PIPE|SILENCIEUX,FLUID,EXHAUST|MUFFLER|LEAK,muffler;exhaust
+CONTROLLER,Controller / ECU R&R,component,\bECU\b|CONTROLLER|CONTROL UNIT|\bECM\b|\bVCM\b,PILOT CONTROLLER|JOYSTICK,ECU|ECM|CONTROLLER|PROGRAM|CODE|NO START|SHUT|REFLASH,ecu;ecm;controller;engine control unit
+SENSOR,Sensor R&R,component,SENSOR|CAPTEUR|SENDER,,SENSOR|CAPTEUR|CODE|FAULT|SENDER,sensor;capteur;speed sensor;pressure sensor
+SOLENOID,Solenoid R&R,component,SOLENOID|SOLENOIDE,,SOLENOID|VALVE|CODE,solenoid
+BELT,Belt R&R,component,\bBELTS?\b|COURROIE,SEAT ?BELT|CONVEYOR|FEEDER|DRAPER,BELT|COURROIE|SQUEAL,belt;v-belt;serpentine belt;fan belt
+BRAKE,Brake repair,component,BRAKE|FREIN,CLEANER,BRAKE|FREIN|STOP,brakes;brake pads;brake repair;freins
+SEAT,Seat R&R,component,\bSEAT\b|SIEGE|BANC,SEAT ?BELT|SEAT SWITCH,SEAT|SIEGE,seat;operator seat
+GLASS,Glass / windshield R&R,component,GLASS|WINDSHIELD|WINDOW|VITRE|PARE-BRISE|WINDSCREEN,,GLASS|WINDSHIELD|WINDOW|VITRE|CRACK,glass;windshield;window;door glass
+TIRE,Tire R&R / repair,component,\bTIRES?\b|\bTYRES?\b|\bPNEUS?\b|FLAT,,TIRE|TYRE|PNEU|FLAT,tire;tires;flat tire;pneu
+UNDERCARRIAGE,Undercarriage / track R&R,component,UNDERCARRIAGE|TRACK CHAIN|\bTRACKS?\b|SPROCKET|(TRACK|CARRIER|BOTTOM|TOP|LOWER|UPPER) ROLLERS?\b|(TRACK|FRONT) IDLERS?\b|CHENILLE,TRACKER|TRACKING,\bTRACK|UNDERCARRIAGE|IDLER|SPROCKET|\bROLLER|CHENILLE,tracks;track chain;undercarriage;sprocket;idler
+GET,Bucket teeth / cutting edge,component,TEETH|TOOTH|CUTTING EDGE|\bEDGES?\b|BUCKET TIPS|DENTS,,TEETH|TOOTH|EDGE|BUCKET|DENTS,bucket teeth;cutting edge;teeth;ground engaging tools
+WIPER,Wiper R&R,component,WIPER|ESSUIE,,WIPER|ESSUIE,wiper;wiper motor;wiper blade
+LIGHT,Light R&R,component,\bLIGHTS?\b|\bLAMPS?\b|HEADLIGHT|LUMIERE,BATTERY LIGHT|WARNING LIGHT|CHECK ENGINE,LIGHT|LAMP|LUMIERE,lights;work light;headlight;lamp
+ENGINE,Engine overhaul / R&R,component,ENGINE (OVERHAUL|REBUILD|R&R|REPLACE)|OVERHAUL|IN-FRAME|INFRAME|SHORT BLOCK|LONG BLOCK|MOTEUR,,ENGINE|OVERHAUL|REBUILD|MOTEUR,engine overhaul;engine rebuild;engine replacement;in-frame
+TRANSMISSION,Transmission repair / R&R,component,TRANSMISSION|TRANNY|GEARBOX|POWERSHIFT|\bIVT\b|HYDROSTAT,,TRANS|GEAR|SHIFT|DRIVE|HYDRO,transmission;gearbox;tranny;ivt
+FINAL_DRIVE,Final drive R&R,component,FINAL DRIVE|FINAL-DRIVE,,FINAL|DRIVE|LEAK,final drive
+SOFTWARE,Software update / reprogram,component,SOFTWARE|REPROGRAM|REFLASH|PAYLOAD|RE-FLASH|LOGICIEL|PROGRAMMING|UPDATE CONTROLLER,,SOFTWARE|PROGRAM|FLASH|PAYLOAD|UPDATE|LOGICIEL,software update;reprogram;reflash;payload
+PINS_BUSHINGS,Pins & bushings replacement,component,PINS? (AND|&) BUSH|BUSHINGS?\b|\bPINS\b|GOUPILLES,,PIN|BUSH|SLOP|PLAY,pins and bushings;bushings;pins
+PM_SERVICE,Planned maintenance service,service,"PM SERVICE|PLANNED MAINT|PREVENTIVE|PREVENTATIVE|PERFORM PM|\bPM\b|ENTRETIEN|OIL CHANGE|VIDANGE|\d{2,4} ?-?(H|HR|HRS|HOUR|HOURS|HEURES?)\b.*(SERVICE|PM|MAINT|INSP)|^SERVICE$|SERVICE UNIT|SERVICE MACHINE|ANNUAL SERVICE",,,pm;pm service;planned maintenance;service;oil change;entretien
+PDI,Pre-delivery inspection / setup,service,\bPDI\b|PRE-?DELIVERY|SET ?UP|SETUP|ASSEMBL|INSPECTION AVANT LIVRAISON,,,pdi;pre-delivery inspection;setup;assembly
+INSPECTION,Inspection,service,INSPECT|EVALUATION|APPRAISAL|CHECK ?OVER|CHECKOVER|WALKAROUND|WALK AROUND|SAFETY CHECK|\bCVIP\b,,,inspection;machine inspection;appraisal;evaluation
+DIAGNOSE,Diagnose / troubleshoot,service,DIAGNOS|TROUBLESHOOT|TROUBLE SHOOT|INVESTIGAT|VERIFIER|VERIFY|\bDIAG\b,,,diagnose;diagnostic;troubleshoot;investigate
+WASH,Wash / clean,service,\bWASH|CLEAN|LAVAGE|NETTOY|STEAM,,,wash;clean;cleaning;lavage
+TRAVEL,Travel / service call,service,TRAVEL|DEPLACEMENT|SERVICE CALL|APPEL DE SERVICE|MILEAGE|KILOMETR|\bKMS?\b|DRIVE TIME|DRIVE TO,,,travel;service call;mileage;deplacement
+TRANSPORT,Transport / trucking,service,TRANSPORT|TRUCKING|\bHAUL(ING)?\b|FREIGHT|LOWBED|DELIVER(Y)? (TO|OF|UNIT|MACHINE)|PICK ?UP (UNIT|MACHINE|FROM|AT),PRE-?DELIVERY|BEFORE DELIVERY|PRIOR TO DELIVERY,,transport;trucking;hauling;delivery

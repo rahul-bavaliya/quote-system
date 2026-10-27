@@ -1,0 +1,95 @@
+import duckdb
+
+
+def test_pipeline_built(built):
+    m = built["meta"]
+    assert m["segments"] > 2500
+    assert m["single_job_sample"] > 1000
+
+
+def test_taxonomy_resolves_ambiguous_parts(built):
+    con = duckdb.connect(str(built["settings"].db_path), read_only=True)
+    tax = dict(con.execute("select part_number, role || ':' || component from part_taxonomy").fetchall())
+    assert tax["TY25879B"] == "primary:BATTERY"        # 'WET CHAR' = wet charged battery
+    assert tax["SE501406"] == "primary:STARTER"
+    assert tax["SE502800"] == "primary:CONTROLLER"     # 'ENGINE C' resolved by 'PROGRAM NEW ECU' text
+    assert tax["CRSE501406"].startswith("core")
+    assert tax["AT365869"].startswith("consumable")
+    # symptom-only segment ('NO START') is labelled by its parts
+    jobs = con.execute("select job_key from segments where description = 'NO START'").fetchall()
+    assert {j[0] for j in jobs} <= {"STARTER"}
+
+
+def test_health(client):
+    r = client.get("/health")
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+
+
+def test_battery_quote(client):
+    r = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "replace battery"})
+    assert r.status_code == 200, r.text
+    q = r.json()
+    assert q["jobs"] == ["BATTERY"]
+    lab = q["labor"][0]
+    assert 0.8 <= lab["p50_hours"] <= 3.5
+    assert lab["p80_hours"] >= lab["p50_hours"]
+    assert lab["level_used"] == "model"
+    kit = q["parts"][0]["kit"]
+    assert any(p["part_number"] == "TY25879B" for p in kit)
+    assert q["similar_work_orders"]
+    assert q["quote_id"]
+
+
+def test_customer_supplied_parts(client):
+    r = client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["BATTERY"], "include_parts": False})
+    q = r.json()
+    assert q["parts"] == [] and q["parts_included"] is False
+    assert q["labor"][0]["p50_hours"] > 0
+
+
+def test_combo_quote(client):
+    r = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "battery and starter R&R"})
+    q = r.json()
+    assert sorted(q["jobs"]) == ["BATTERY", "STARTER"]
+    single = max(l["p50_hours"] for l in q["labor"])
+    assert q["total"]["p50_hours"] >= single
+
+
+def test_unknown_model_falls_back(client):
+    r = client.post("/quotes", json={"make": "JD", "model": "333X", "job_codes": ["STARTER"]})
+    q = r.json()
+    assert r.status_code == 200
+    assert q["machine"]["known_model"] is False and q["machine"]["base_model"] == "333"
+    assert q["labor"][0]["level_used"] in {"base", "make_div", "division", "global"}
+
+
+def test_symptom_gets_diagnosis(client):
+    r = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "machine not starting"})
+    assert r.status_code == 422
+    d = r.json()["detail"]
+    fixes = {f["job_key"] for f in d["diagnosis"]["likely_fixes"]}
+    assert {"BATTERY", "STARTER"} <= fixes
+    r = client.get("/diagnose", params={"symptom": "no start", "make": "JD", "model": "333G"})
+    assert r.json()["symptom"] == "NO_START"
+
+
+def test_bad_requests(client):
+    assert client.post("/quotes", json={"make": "JD", "model": "333G"}).status_code == 422
+    assert client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["NOPE"]}).status_code == 422
+    assert client.get("/quotes/doesnotexist").status_code == 404
+
+
+def test_record_actual_and_accuracy(client):
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["PM_500"]}).json()
+    assert client.post(f"/quotes/{q['quote_id']}/actual", json={"actual_hours": 4.5}).status_code == 200
+    got = client.get(f"/quotes/{q['quote_id']}").json()
+    assert got["actual"]["actual_hours"] == 4.5
+    assert client.get("/accuracy").json()["with_actuals"] >= 1
+
+
+def test_search_endpoints(client):
+    jobs = client.get("/jobs", params={"q": "batt"}).json()
+    assert jobs[0]["job_code"] == "BATTERY"
+    models = client.get("/models", params={"make": "JD", "q": "333"}).json()
+    assert {m["model"] for m in models} >= {"333G", "333P"}
+    assert client.get("/").status_code == 200
