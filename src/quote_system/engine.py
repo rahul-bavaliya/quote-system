@@ -13,9 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
+import numpy as np
 
 from .config import Settings
 from .rules import jobs_from_text, normalize_text, symptoms_from_text
+from .textsearch import TextIndex, index_dir_for
 
 LEVEL_ORDER = ("global", "division", "make_div", "base", "model")  # least -> most specific
 PCTS = ("p25", "p50", "p80", "p90")
@@ -46,6 +48,15 @@ class Machine:
         return f"{self.make}|{self.model}"
 
 
+def _wquantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    order = np.argsort(values)
+    v, w = values[order], weights[order]
+    if w.sum() <= 0:
+        return float(np.quantile(values, q))
+    cw = (np.cumsum(w) - 0.5 * w) / w.sum()
+    return float(np.interp(q, cw, v))
+
+
 class EngineNotReady(RuntimeError):
     pass
 
@@ -59,6 +70,8 @@ class QuoteEngine:
         self._lock = threading.Lock()
         self.con = duckdb.connect(str(self.db_path), read_only=True)
         self._load()
+        idx = index_dir_for(self.db_path)
+        self.text_index = TextIndex(idx) if (idx / "model.joblib").exists() else None
 
     # ------------------------------------------------------------------ loading
     def _load(self) -> None:
@@ -334,3 +347,129 @@ class QuoteEngine:
             "jobs": jobs, "labor": labor, "total": total, "parts": parts,
             "parts_included": include_parts, "similar_work_orders": evidence, "warnings": warnings,
         }
+
+    # ------------------------------------------------------------------ context (similar-history) quotes
+    def similar_quote(self, text: str, m: Machine, include_parts: bool = True) -> dict | None:
+        """Quote from past segments whose description *means* the same thing as ``text``.
+
+        Works for any job, including ones with no job code ('VALVE LASH ADJUSTMENT')."""
+        if self.text_index is None:
+            return None
+        matches = self.text_index.search(text)
+        if not matches:
+            return None
+        # precision first: use the tightest similarity cut that still leaves enough history
+        best = matches[0][1]
+        for frac in (0.95, 0.9, 0.85, 0.8, 0.75):
+            chosen = [x for x in matches if x[1] >= frac * best]
+            if sum(n for _, _, n in chosen) >= self.settings.similar_min_pool:
+                break
+        matches = chosen
+        score_of = {t: sc for t, sc, _ in matches}
+        c = self.cursor()
+        rows = c.execute("""
+            select service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
+                   make, model, base_model, division, actual_hours, eq_hours
+            from text_pool where norm_text in (select unnest(?))
+        """, [list(score_of)]).fetchall()
+        if not rows:
+            return None
+        hours = np.array([r[11] for r in rows], dtype=float)
+        lh = np.log(hours)
+        med = np.median(lh)
+        mad = max(1.4826 * np.median(np.abs(lh - med)), 0.1)
+        keep = np.abs(lh - med) / mad <= self.settings.outlier_mad_z
+        rows = [r for r, k in zip(rows, keep) if k]
+        keys = {
+            "global": lambda r: "", "division": lambda r: r[10], "make_div": lambda r: f"{r[7]}|{r[10]}",
+            "base": lambda r: f"{r[7]}|{r[9]}", "model": lambda r: f"{r[7]}|{r[8]}",
+        }
+        k = self.settings.shrink_k
+        est, basis, used_level, used_n, level_rows = None, [], None, 0, {}
+        for lvl in LEVEL_ORDER:
+            key = m.key(lvl)
+            if key is None:
+                continue
+            sub = [r for r in rows if keys[lvl](r) == key]
+            if not sub:
+                continue
+            level_rows[lvl] = sub
+            h = np.array([r[11] for r in sub])
+            w = np.array([score_of.get(r[6], 0.0) for r in sub]) ** 4  # closer wording counts more
+            st = {p: _wquantile(h, w, q) for p, q in (("p25", .25), ("p50", .5), ("p80", .8), ("p90", .9))}
+            n = len(sub)
+            basis.append({"level": lvl, "key": key, "n": n, "p50": round(float(st["p50"]), 2),
+                          "p80": round(float(st["p80"]), 2)})
+            est = st if est is None else {p: (n * st[p] + k * est[p]) / (n + k) for p in PCTS}
+            if n >= self.settings.min_level_n:
+                used_level, used_n = lvl, n
+        if est is None:
+            return None
+        n_model = len(level_rows.get("model", []))
+        n_base = len(level_rows.get("base", []))
+        conf = "high" if n_model >= 20 else "medium" if (n_model >= 5 or n_base >= 20) else "low"
+        if best < 0.7 and conf != "low":
+            conf = "medium" if conf == "high" else "low"
+        eqs = [r[12] for r in rows if r[12] and r[12] > 0]
+        labor = {
+            "job_key": "SIMILAR", "display_name": text.strip(),
+            **{f"{p}_hours": round(float(est[p]), 2) for p in PCTS},
+            "level_used": used_level or "global", "sample_size": used_n, "confidence": conf,
+            "historical_eq_hours": {"level": "global", "n": len(eqs), "p50": round(float(np.median(eqs)), 2)} if len(eqs) >= 3 else None,
+            "basis": list(reversed(basis)),
+        }
+        # the most specific level with enough segments drives evidence and parts
+        spec = next((lvl for lvl in ("model", "base", "make_div", "division", "global")
+                     if len(level_rows.get(lvl, [])) >= self.settings.kit_min_segments), None) \
+            or next(iter(reversed(list(level_rows))))
+        pool = level_rows[spec]
+        model_counts: dict[str, int] = {}
+        for r in level_rows.get("model", []):
+            model_counts[r[6]] = model_counts.get(r[6], 0) + 1
+        matched = sorted(({"description": t, "score": sc, "segments": n, "on_this_model": model_counts.get(t, 0)}
+                          for t, sc, n in matches),
+                         key=lambda d: (-d["score"], -d["on_this_model"], -d["segments"]))[:15]
+        recent = sorted(pool, key=lambda r: (score_of.get(r[6], 0), r[4]), reverse=True)[:8]
+        evidence = [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
+                     "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[11], "eq_hours": r[12],
+                     "model": r[8], "match_score": score_of.get(r[6])} for r in recent]
+        parts = []
+        if include_parts:
+            parts = [self._kit_from_segments([r[0] for r in pool], spec)]
+        warnings = []
+        if best < 0.7:
+            warnings.append("Closest past descriptions are only a loose match - check the matched descriptions.")
+        if not m.known_model:
+            warnings.append(f"Model {m.model} not in history; using base model {m.base_model} / division {m.division}.")
+        return {
+            "mode": "similar_history", "query": text,
+            "machine": {"make": m.make, "model": m.model, "base_model": m.base_model, "division": m.division,
+                        "known_model": m.known_model},
+            "jobs": [], "labor": [labor],
+            "total": {k2: labor[k2] for k2 in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")} | {"method": "similar_history"},
+            "parts": parts, "parts_included": include_parts,
+            "matched_descriptions": matched, "matched_segments": len(rows),
+            "similar_work_orders": evidence, "warnings": warnings,
+        }
+
+    def _kit_from_segments(self, ids: list[str], level: str) -> dict:
+        c = self.cursor()
+        n = len(ids)
+        rows = c.execute("""
+            with p as (select service_order_id, part_number, sum(qty) q from parts
+                       where service_order_id in (select unnest(?)) and coalesce(qty, 0) > 0 group by all)
+            select p.part_number, t.description, t.role, t.component, count(*) segs, median(p.q) qty
+            from p left join part_taxonomy t using (part_number)
+            group by all order by segs desc, part_number
+        """, [ids]).fetchall()
+        kit, optional = [], []
+        for pn, desc, role, comp, segs, qty in rows:
+            rate = segs / n
+            if rate < self.settings.kit_optional_attach:
+                break
+            item = {"part_number": pn, "description": desc, "role": role, "component": comp or None,
+                    "attach_rate": round(rate, 3), "qty": round(qty, 2) if qty is not None else None,
+                    "seen_on_segments": segs}
+            (kit if rate >= self.settings.kit_attach else optional).append(item)
+        return {"job_code": "SIMILAR", "level_used": level, "segments": n, "kit": kit, "optional": optional[:15]}
+

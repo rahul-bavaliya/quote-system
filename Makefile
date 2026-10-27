@@ -5,7 +5,7 @@ PORT ?= 8000
 
 help:
 	@echo "make install    install the package + dev tools"
-	@echo "make pipeline   build data/quote.duckdb from data/raw/*.xlsx|csv (about 1-2 min)"
+	@echo "make pipeline   build data/quote.duckdb from data/raw/*.xlsx|csv (about 2 min)"
 	@echo "make run        start the API + quote page on :$(PORT)"
 	@echo "make test       run the test-suite (synthetic data, no company data needed)"
 	@echo "make backtest   train on data before 2026-01-01, test on later jobs"
@@ -36,7 +36,7 @@ test: deps
 	$(PY) -m pytest -q
 
 backtest: deps
-	$(PY) -m quote_system.backtest --cutoff 2026-01-01
+	$(PY) -m quote_system.backtest --cutoff 2026-01-01 --similar-sample 1500
 
 sample: deps
 	$(PY) -m quote_system.sample_data data/raw-sample

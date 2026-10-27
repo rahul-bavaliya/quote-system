@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -19,6 +20,7 @@ from .ingest import ingest
 from .labeling import classify_parts, label_segments
 from .rules import load_jobs, pm_job_codes
 from .stats import build_stats
+from .textsearch import build_index, index_dir_for
 
 log = logging.getLogger("quote_system.pipeline")
 
@@ -63,6 +65,21 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
     meta = build_stats(con, settings, cutoff=cutoff)
     log.info("stats done in %.1fs", time.time() - t0)
 
+    # context search: every segment with usable hours, labelled or not ('VALVE LASH ADJUSTMENT' has no job code)
+    con.execute(f"""
+        create or replace table text_pool as
+        select service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
+               make, model, base_model, division, actual_hours, eq_hours, job_key
+        from scoped where actual_hours > 0 and actual_hours <= {settings.max_hours} and norm_text <> ''
+    """)
+    con.execute("create index if not exists ix_pool_text on text_pool (norm_text)")
+    texts = con.execute("select norm_text, count(*) from text_pool group by 1 order by 1").fetchall()
+    idx_tmp = index_dir_for(db_path).with_name(index_dir_for(db_path).name + ".building")
+    shutil.rmtree(idx_tmp, ignore_errors=True)
+    meta["text_index"] = build_index([t for t, _ in texts], [n for _, n in texts], idx_tmp)
+    con.execute("insert into meta values ('text_index', ?)", [json.dumps(meta["text_index"])])
+    log.info("text index %s, done in %.1fs", meta["text_index"], time.time() - t0)
+
     # keep the serving db lean: raw tables are in parquet already
     for t in ("workorders", "eligible", "scoped", "hours_sample", "part_desc", "part_rule"):
         con.execute(f"drop table if exists {t}")
@@ -70,6 +87,9 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
     con.execute("checkpoint")
     con.close()
     shutil.move(str(tmp), str(db_path))  # atomic swap so a running API never sees a half-built db
+    final_idx = index_dir_for(db_path)
+    shutil.rmtree(final_idx, ignore_errors=True)
+    shutil.move(str(idx_tmp), str(final_idx))
     log.info("wrote %s in %.1fs", db_path, time.time() - t0)
     return meta
 

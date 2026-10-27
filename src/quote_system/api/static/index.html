@@ -12,7 +12,7 @@ header{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justif
 h1{font-size:18px;margin:0;font-weight:600}.sub{color:var(--muted);font-size:13px}
 main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
-form{display:grid;grid-template-columns:110px 160px 1fr auto auto;gap:10px;align-items:end}
+form{display:grid;grid-template-columns:100px 140px 1fr 150px auto auto;gap:10px;align-items:end}
 @media (max-width:760px){form{grid-template-columns:1fr 1fr}form .wide{grid-column:1/-1}}
 label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
 input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
@@ -40,7 +40,9 @@ h2{font-size:15px;margin:0 0 10px}.muted{color:var(--muted)}.small{font-size:12p
     <form id="f" autocomplete="off">
       <div><label for="make">Make</label><input id="make" list="makes" value="JD" required></div>
       <div><label for="model">Model</label><input id="model" list="models" placeholder="333G" required></div>
-      <div class="wide"><label for="job">Job (free text or pick)</label><input id="job" list="jobs" placeholder="replace battery, starter R&amp;R, 500 hour service, machine not starting…" required></div>
+      <div class="wide"><label for="job">Job (free text or pick)</label><input id="job" list="jobs" placeholder="valve lash adjustment, replace battery, cab door hinge broken, not starting…" required></div>
+      <div><label for="match">Understand job by</label><select id="match">
+        <option value="auto">Auto (context first)</option><option value="context">Context (past work)</option><option value="job">Job list only</option></select></div>
       <label class="chk"><input type="checkbox" id="parts" checked> include parts</label>
       <button type="submit">Quote</button>
     </form>
@@ -76,9 +78,10 @@ $('#f').addEventListener('submit', e => { e.preventDefault(); quote({job_text: $
 
 async function quote(jobSpec){
   $('#msg').textContent = ''; $('#out').innerHTML = '<p class="muted">Quoting…</p>';
-  const body = {make: $('#make').value, model: $('#model').value, include_parts: $('#parts').checked, ...jobSpec};
+  const body = {make: $('#make').value, model: $('#model').value, include_parts: $('#parts').checked,
+                match: $('#match').value, ...jobSpec};
   // the datalist inserts display names: map them back to codes
-  if (body.job_text) {
+  if (body.job_text && body.match !== 'context') {
     const jb = await api('/jobs?limit=100');
     const hit = jb.body.find(j => j.display_name.toLowerCase() === body.job_text.toLowerCase());
     if (hit) { body.job_codes = [hit.job_code]; delete body.job_text; }
@@ -88,24 +91,28 @@ async function quote(jobSpec){
   render(r.body);
 }
 
-function showError(r){
-  const d = r.body.detail;
-  if (typeof d !== 'object' || !d) { $('#out').innerHTML = ''; $('#msg').textContent = typeof d === 'string' ? d : `Error ${r.status}`; return; }
-  let html = `<div class="card"><h2>${esc(d.error || 'Could not quote')}</h2>`;
-  if (d.diagnosis && d.diagnosis.likely_fixes.length){
-    const dg = d.diagnosis;
-    html += `<p class="small muted">This reads like a symptom (${esc(dg.symptom)}). On ${dg.segments_with_symptom} similar segments (${esc(dg.level_used)} level) the fix was:</p>
+function diagHtml(dg){
+  return `<p class="small muted">This reads like a symptom (${esc(dg.symptom)}). On ${dg.segments_with_symptom} similar segments (${esc(dg.level_used)} level) the fix was:</p>
       <div class="scroll"><table><tr><th>Fix</th><th class="num">Share</th><th class="num">P50 h</th><th class="num">P80 h</th><th></th></tr>` +
       dg.likely_fixes.map(f => `<tr><td>${f.jobs.length ? esc(f.display_name) : `<span class="muted">${esc(f.display_name)}</span>`}</td>
         <td class="num">${(f.share*100).toFixed(0)}%</td><td class="num">${h(f.p50_hours)}</td><td class="num">${h(f.p80_hours)}</td>
         <td>${f.jobs.length ? `<button class="ghost" data-jobs='${JSON.stringify(f.jobs)}'>Quote</button>` : ''}</td></tr>`).join('') + '</table></div>';
-  }
+}
+function wireJobButtons(){
+  $('#out').querySelectorAll('button[data-jobs]').forEach(b => b.onclick = () => quote({job_codes: JSON.parse(b.dataset.jobs)}));
+}
+
+function showError(r){
+  const d = r.body.detail;
+  if (typeof d !== 'object' || !d) { $('#out').innerHTML = ''; $('#msg').textContent = typeof d === 'string' ? d : `Error ${r.status}`; return; }
+  let html = `<div class="card"><h2>${esc(d.error || 'Could not quote')}</h2>`;
+  if (d.diagnosis && d.diagnosis.likely_fixes.length) html += diagHtml(d.diagnosis);
   if (d.suggestions && d.suggestions.length){
     html += `<p class="small muted" style="margin-top:14px">Or pick a job:</p><div class="chips">` +
       d.suggestions.map(s => `<button data-jobs='${JSON.stringify([s.job_code])}'>${esc(s.display_name)}</button>`).join('') + '</div>';
   }
   $('#out').innerHTML = html + '</div>';
-  $('#out').querySelectorAll('button[data-jobs]').forEach(b => b.onclick = () => quote({job_codes: JSON.parse(b.dataset.jobs)}));
+  wireJobButtons();
 }
 
 function render(q){
@@ -117,7 +124,15 @@ function render(q){
     <div class="big"><div><div class="n">${h(tot.p50_hours)} h</div><div class="l">typical (P50)</div></div>
     <div><div class="n">${h(tot.p80_hours)} h</div><div class="l">safe quote (P80)</div></div>
     <div><div class="n" style="font-size:20px">${h(tot.p25_hours)}–${h(tot.p90_hours)} h</div><div class="l">P25–P90 range</div></div></div>
-    <p class="small muted">Method: ${esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p></div>`;
+    <p class="small muted">Method: ${q.mode === 'similar_history' ? `context match – ${q.matched_segments.toLocaleString()} past segments with the same meaning` : esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p>
+    ${q.job_list_check ? `<p class="small muted">Job list check (${esc(q.job_list_check.display)}): P50 ${h(q.job_list_check.total.p50_hours)} h / P80 ${h(q.job_list_check.total.p80_hours)} h.</p>` : ''}
+    ${q.context_check ? `<p class="small muted">Context check: ${q.context_check.matched_segments.toLocaleString()} past segments worded like this took P50 ${h(q.context_check.total.p50_hours)} h / P80 ${h(q.context_check.total.p80_hours)} h (${esc(q.context_check.level_used)} level, n=${q.context_check.sample_size}).</p>` : ''}</div>`;
+  if (q.matched_descriptions){
+    html += `<div class="card"><h2>Matched past descriptions</h2><p class="small muted">How the job was understood: past segment descriptions with the same meaning (top 15).</p>
+      <div class="scroll"><table><tr><th>Description</th><th class="num">Match</th><th class="num">Segments</th><th class="num">On ${esc(m.model)}</th></tr>` +
+      q.matched_descriptions.map(d => `<tr><td>${esc(d.description)}</td><td class="num">${Math.round(d.score*100)}%</td><td class="num">${d.segments}</td><td class="num">${d.on_this_model || ''}</td></tr>`).join('') + '</table></div></div>';
+  }
+  if (q.diagnosis) html += `<div class="card"><h2>Likely fixes</h2>${diagHtml(q.diagnosis)}</div>`;
 
   html += `<div class="card"><h2>Labour by job</h2><div class="scroll"><table><tr><th>Job</th><th class="num">P50</th><th class="num">P80</th><th>Based on</th><th>Confidence</th><th class="num">EQ hrs (hist.)</th></tr>` +
     q.labor.map(l => `<tr><td>${esc(l.display_name)}</td><td class="num">${h(l.p50_hours)}</td><td class="num">${h(l.p80_hours)}</td>
@@ -130,8 +145,8 @@ function render(q){
     for (const k of q.parts){
       const rows = (list, tag) => list.map(p => `<tr><td>${esc(p.part_number)}</td><td>${esc(p.description)}</td>
         <td class="small muted">${esc(p.role)}</td><td class="num">${p.qty ?? ''}</td><td class="num">${(p.attach_rate*100).toFixed(0)}%</td></tr>`).join('');
-      html += `<div class="card"><h2>Parts – ${esc(k.job_code)}</h2>` + (k.level_used
-        ? `<p class="small muted">From ${k.segments} single-job segments at ${esc(k.level_used)} level. % = share of those jobs that used the part.</p>
+      html += `<div class="card"><h2>${k.job_code === 'SIMILAR' ? 'Parts used on these jobs' : 'Parts – ' + esc(k.job_code)}</h2>` + (k.level_used
+        ? `<p class="small muted">From ${k.segments} ${k.job_code === 'SIMILAR' ? 'matching' : 'single-job'} segments at ${esc(k.level_used)} level. % = share of those jobs that used the part.</p>
            <div class="scroll"><table><tr><th>Part</th><th>Desc</th><th>Role</th><th class="num">Qty</th><th class="num">Used</th></tr>${rows(k.kit)}
            ${k.optional.length ? `<tr><td colspan="5" class="small muted" style="padding-top:12px">Sometimes needed</td></tr>${rows(k.optional)}` : ''}</table></div>
            ${!k.kit.length && !k.optional.length ? '<p class="small muted">No part is used consistently on this job.</p>' : ''}`
@@ -144,11 +159,12 @@ function render(q){
   if (q.similar_work_orders.length){
     html += `<div class="card"><h2>Recent similar work orders</h2><div class="scroll"><table><tr><th>WO-Seg</th><th>Date</th><th>Branch</th><th>Description</th><th class="num">Actual</th><th class="num">EQ</th></tr>` +
       q.similar_work_orders.map(w => `<tr><td>${w.wo_number}-${w.segment}</td><td>${esc(w.invoice_date)}</td><td>${esc(w.branch)}</td>
-      <td>${esc(w.description)} <span class="muted small">${esc(w.model)}</span></td><td class="num">${h(w.actual_hours)}</td><td class="num">${h(w.eq_hours)}</td></tr>`).join('') + '</table></div></div>';
+      <td>${esc(w.description)} <span class="muted small">${esc(w.model)}${w.match_score != null ? ' · ' + Math.round(w.match_score*100) + '% match' : ''}</span></td><td class="num">${h(w.actual_hours)}</td><td class="num">${h(w.eq_hours)}</td></tr>`).join('') + '</table></div></div>';
   }
   html += `<div class="card"><h2>Record actual hours</h2><div style="display:flex;gap:8px;max-width:420px">
     <input id="act" type="number" min="0" step="0.25" placeholder="actual hours"><button class="ghost" id="saveAct">Save</button></div><p id="actMsg" class="small muted"></p></div>`;
   $('#out').innerHTML = html;
+  wireJobButtons();
   $('#saveAct').onclick = async () => {
     const v = parseFloat($('#act').value);
     if (isNaN(v)) { $('#actMsg').textContent = 'Enter hours first'; return; }

@@ -34,6 +34,8 @@ JOBS = {
               [("AT365869", "OIL FILT", 1), ("RE541922", "FUEL FIL", 1), ("TY26674", "PLUS-50", 4), ("WDF", "WASTE DI", 1)], 4.0),
     "hose": (["REPLACE HYDRAULIC HOSE", "BLOWN HOSE ON BOOM"], [("AT312345", "HOSE", 1), ("51M7044", "O-RING", 2)], 2.5),
     "travel": (["TRAVEL", "SERVICE CALL", "TRAVEL TO SITE"], [], 2.0),
+    "valves": (["VALVE LASH ADJUSTMENT", "SET ENGINE VALVES", "ADJUST VALVE CLEARANCE", "PERFORM VALVE SET",
+                "AJUSTEMENT DES VALVES"], [("R526607", "SEAL", 1)], 5.0),
 }
 
 
@@ -53,7 +55,7 @@ def generate(out_dir: Path, n_wo: int = 2500, seed: int = 7) -> tuple[Path, Path
         nseg = rnd.choice([1, 1, 1, 2])
         for seg in range(1, nseg + 1):
             kind = rnd.choices(list(JOBS) + ["nostart_batt", "nostart_starter", "batt_starter"],
-                               weights=[30, 12, 6, 20, 12, 15, 8, 4, 3])[0]
+                               weights=[30, 12, 6, 20, 12, 15, 6, 8, 4, 3])[0]
             parts = []
             if kind == "nostart_batt":
                 desc, parts, med = "MACHINE NOT STARTING", JOBS["battery"][1], 2.0

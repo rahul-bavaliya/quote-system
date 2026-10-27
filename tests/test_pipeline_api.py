@@ -26,10 +26,10 @@ def test_health(client):
 
 
 def test_battery_quote(client):
-    r = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "replace battery"})
+    r = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "replace battery", "match": "job"})
     assert r.status_code == 200, r.text
     q = r.json()
-    assert q["jobs"] == ["BATTERY"]
+    assert q["jobs"] == ["BATTERY"] and q["mode"] == "job_catalog"
     lab = q["labor"][0]
     assert 0.8 <= lab["p50_hours"] <= 3.5
     assert lab["p80_hours"] >= lab["p50_hours"]
@@ -48,7 +48,7 @@ def test_customer_supplied_parts(client):
 
 
 def test_combo_quote(client):
-    r = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "battery and starter R&R"})
+    r = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "battery and starter R&R", "match": "job"})
     q = r.json()
     assert sorted(q["jobs"]) == ["BATTERY", "STARTER"]
     single = max(l["p50_hours"] for l in q["labor"])
@@ -65,16 +65,42 @@ def test_unknown_model_falls_back(client):
 
 def test_symptom_gets_diagnosis(client):
     r = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "machine not starting"})
-    assert r.status_code == 422
-    d = r.json()["detail"]
-    fixes = {f["job_key"] for f in d["diagnosis"]["likely_fixes"]}
+    assert r.status_code == 200, r.text
+    q = r.json()
+    assert q["mode"] == "similar_history"
+    fixes = {f["job_key"] for f in q["diagnosis"]["likely_fixes"]}
     assert {"BATTERY", "STARTER"} <= fixes
     r = client.get("/diagnose", params={"symptom": "no start", "make": "JD", "model": "333G"})
     assert r.json()["symptom"] == "NO_START"
 
 
+def test_context_quote_matches_meaning(client):
+    # not in the job list: answered from past segments with the same meaning, whatever the wording
+    r = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "valve lash adjustment"})
+    assert r.status_code == 200, r.text
+    q = r.json()
+    assert q["mode"] == "similar_history"
+    matched = {d["description"] for d in q["matched_descriptions"]}
+    assert {"SET ENGINE VALVES", "ADJUST VALVE CLEARANCE", "AJUSTEMENT DES VALVES"} <= matched
+    assert 2.5 <= q["total"]["p50_hours"] <= 9
+    assert any(p["part_number"] == "R526607" for p in q["parts"][0]["kit"] + q["parts"][0]["optional"])
+    assert all("BATTER" not in d for d in matched)
+    # the job list alone does not know it
+    assert client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "valve lash adjustment",
+                                        "match": "job"}).status_code == 422
+    # auto: context first, with the job-list answer attached for comparison
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "replace battery"}).json()
+    assert q["mode"] == "similar_history" and q["job_list_check"]["jobs"] == ["BATTERY"]
+    assert any(p["part_number"] == "TY25879B" for p in q["parts"][0]["kit"])
+    # job list only: context check attached
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "replace battery", "match": "job"}).json()
+    assert q["mode"] == "job_catalog" and q["context_check"]["matched_segments"] > 0
+    assert client.get("/similar", params={"q": "set valves", "make": "JD", "model": "S780"}).status_code == 200
+
+
 def test_bad_requests(client):
     assert client.post("/quotes", json={"make": "JD", "model": "333G"}).status_code == 422
+    assert client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "zzqx wibble"}).status_code == 422
     assert client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["NOPE"]}).status_code == 422
     assert client.get("/quotes/doesnotexist").status_code == 404
 

@@ -40,6 +40,7 @@ class Settings:
     stats_statuses: str = _env("QS_STATS_STATUSES", "Invoiced")   # comma separated
     stats_exclude_sales_types: str = _env("QS_STATS_EXCLUDE_SALES_TYPES", "Expense")  # comma separated
     combo_min_n: int = _env("QS_COMBO_MIN_N", 10)                # history needed to quote a combo directly
+    similar_min_pool: int = _env("QS_SIMILAR_MIN_POOL", 40)      # segments wanted before loosening the text match
 
     def ensure_dirs(self) -> None:
         self.work_dir.mkdir(parents=True, exist_ok=True)

@@ -30,3 +30,13 @@ def test_pm_intervals_and_modifiers():
     # diagnosis is dropped when the repair itself is named
     assert jobs_from_text("diagnose and replace starter", CFG) == ["STARTER"]
     assert jobs_from_text("diagnose no start", CFG) == ["DIAGNOSE"]
+
+
+def test_context_tokens_share_meaning():
+    from quote_system.textsearch import tokens
+
+    same = ["VALVE LASH ADJUSTMENT", "SET ENGINE VALVES", "PERFORM ENGINE VALVE-SET", "AJUSTEMENT DES VALVES",
+            "ENGINE VALVE CLEARANCE, ADJUST"]
+    assert all(tokens(t) == ["VALVEADJUST"] for t in same)
+    assert "VALVEADJUST" not in tokens("REPLACE CHECK VALVE")
+    assert tokens("remove and replace a/c compressor") == tokens("R&R AC COMPRESSOR")

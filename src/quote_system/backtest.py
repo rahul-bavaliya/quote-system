@@ -84,6 +84,40 @@ def run(cutoff: str, rebuild: bool = True, max_rows: int | None = None) -> dict:
     return report
 
 
+def run_similar(cutoff: str, sample: int = 1500, seed: int = 0) -> dict:
+    """Compare job-code quotes with context (similar-description) quotes on the same later segments."""
+    import random
+
+    s = get_settings()
+    eng = QuoteEngine(s, s.db_path.with_name("backtest.duckdb"))
+    excl = tuple(x.strip() for x in s.stats_exclude_sales_types.split(",") if x.strip()) or ("",)
+    base_sql = f"""
+        select job_key, n_jobs, make, model, description, actual_hours from segments
+        where status = 'Invoiced' and invoice_date >= date '{cutoff}' and actual_hours > 0
+          and actual_hours <= {s.max_hours} and coalesce(sales_type, '') not in ({", ".join("?" for _ in excl)})
+          and norm_text <> ''"""
+    rows = eng.cursor().execute(base_sql, list(excl)).fetchall()
+    rnd = random.Random(seed)
+    labelled = [r for r in rows if r[1] == 1]
+    unlabelled = [r for r in rows if r[1] == 0]
+    labelled = rnd.sample(labelled, min(sample, len(labelled)))
+    unlabelled = rnd.sample(unlabelled, min(sample // 2, len(unlabelled)))
+    cat, sim, sim_unl = [], [], []
+    for job, _, make, model, desc, act in labelled:
+        m = eng.machine(make, model)
+        a = eng.labor_estimate(job, m)
+        b = eng.similar_quote(desc, m, include_parts=False)
+        if a and b:
+            cat.append((a["p50_hours"], act))
+            sim.append((b["total"]["p50_hours"], act))
+    for _, _, make, model, desc, act in unlabelled:
+        b = eng.similar_quote(desc, eng.machine(make, model), include_parts=False)
+        if b:
+            sim_unl.append((b["total"]["p50_hours"], act))
+    return {"labelled_job_code": _metrics(cat), "labelled_similar": _metrics(sim),
+            "unlabelled_similar": _metrics(sim_unl), "unlabelled_tried": len(unlabelled)}
+
+
 def _markdown(r: dict) -> str:
     def row(name, m):
         return (f"| {name} | {m.get('n', 0)} | {m.get('mae_hours', '-')} | {m.get('median_abs_err_hours', '-')} | "
@@ -110,10 +144,26 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cutoff", default="2026-01-01")
     ap.add_argument("--no-rebuild", action="store_true")
+    ap.add_argument("--similar-sample", type=int, default=0,
+                    help="also compare job-code vs context quotes on N sampled later segments")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     r = run(args.cutoff, rebuild=not args.no_rebuild)
     print(Path(r["report_path"]).read_text())
+    if args.similar_sample:
+        sim = run_similar(args.cutoff, args.similar_sample)
+        lines = ["", "## Job-code vs context (similar description) quotes", "",
+                 "| | n | MAE h | median abs err h | within 25% | within 50% |", "|---|---|---|---|---|---|"]
+        for name, key in (("Job-code quote (labelled segments)", "labelled_job_code"),
+                          ("Context quote (same segments)", "labelled_similar"),
+                          ("Context quote (segments with no job code)", "unlabelled_similar")):
+            m = sim[key]
+            lines.append(f"| {name} | {m.get('n', 0)} | {m.get('mae_hours', '-')} | {m.get('median_abs_err_hours', '-')} | "
+                         f"{m.get('within_25pct', '-')} | {m.get('within_50pct', '-')} |")
+        text = "\n".join(lines) + "\n"
+        with open(r["report_path"], "a") as f:
+            f.write(text)
+        print(text)
 
 
 if __name__ == "__main__":
