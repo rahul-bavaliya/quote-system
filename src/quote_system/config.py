@@ -44,6 +44,10 @@ class Settings:
     max_drop: float = _env("QS_MAX_DROP", 0.3)                    # refuse a build that loses >30% of segments
     combo_min_n: int = _env("QS_COMBO_MIN_N", 10)                # history needed to quote a combo directly
     similar_min_pool: int = _env("QS_SIMILAR_MIN_POOL", 40)      # segments wanted before loosening the text match
+    # machine-class scaling of broad history: backtested, scaling *down* (small machines) helped and scaling
+    # up slightly hurt, so the factor is capped at 1.0 by default
+    class_factor_min: float = _env("QS_CLASS_FACTOR_MIN", 0.3)
+    class_factor_max: float = _env("QS_CLASS_FACTOR_MAX", 1.0)
 
     # --- service (read at start-up, so tests / containers can set them per process) ---
     api_keys: str = field(default_factory=lambda: os.environ.get("QS_API_KEYS", ""))      # comma separated; empty = auth off

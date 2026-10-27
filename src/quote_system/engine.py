@@ -231,7 +231,7 @@ class QuoteEngine:
                 log_f = (j[1] * j[4] + k * overall) / (j[1] + k)
                 basis = (f"{self.catalog.get(j[0], {}).get('display_name', j[0])}: {j[2]:.1f} h on similar machines "
                          f"vs {j[3]:.1f} h at {ref_level} level ({j[1]} jobs), shrunk toward the {len(pairs)}-job median")
-            f = float(np.clip(np.exp(log_f), 0.3, 3.0))
+            f = float(np.clip(np.exp(log_f), self.settings.class_factor_min, self.settings.class_factor_max))
             out = {"factor": round(f, 3), "from_level": ref_level, "basis": basis, "shared_jobs": len(pairs),
                    "machine_group": group}
         self._sim_cache[ck] = out

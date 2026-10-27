@@ -166,7 +166,9 @@ similarity = 0.6 × parts + 0.4 × work, within a make. On your data the 50G's n
 How a quote climbs: **model → series → base → similar machines → make + division → division → all**. Two rules keep big machines from setting the price for small ones:
 
 1. **Similar machines come before the broad levels.** A 50G arm-cylinder job uses 50G history, then its siblings, and only then everything else.
-2. **Broad history is scaled to the machine class.** When the broad levels are needed, they are first multiplied by a class factor. The factor is measured on jobs the class shares with the broad group. The job being quoted counts most (for cylinder work, 3.6 h on 50G-class machines vs 6.5 h on JD C&F), shrunk toward the median over all shared job types. For example, JD 50G arm cylinder replace has no 50G-class history; it comes out at **2.5 h** (31 jobs on other C&F machines × 0.57) instead of 6.7 h. Big machines get factors above 1 (350GLC ×1.5 on cylinder reseals). Busy models with their own history are hardly affected.
+2. **Broad history is scaled to the machine class.** When the broad levels are needed, they are first multiplied by a class factor. The factor is measured on jobs the class shares with the broad group. The job being quoted counts most (for cylinder work, 3.6 h on 50G-class machines vs 6.5 h on JD C&F), shrunk toward the median over all shared job types. For example, JD 50G arm cylinder replace has no 50G-class history; it comes out at **2.5 h** (31 jobs on other C&F machines × 0.57) instead of 6.7 h. Busy models with their own history are hardly affected.
+
+Backtested on 2026 jobs, scaling **down** made quotes more accurate where it applied: within ±25 % rose from 24.5 % to 27.6 % of jobs, and the median error fell from 1.71 h to 1.64 h. Scaling **up** for big machines made them slightly worse, so the factor is capped at 1.0 by default (`QS_CLASS_FACTOR_MAX`).
 
 The response lists `machine.similar_machines`, and each labour line has `similar_machines_used` and `scaled_to_machine_class`. The page shows both, so the estimator can see where the hours came from.
 
