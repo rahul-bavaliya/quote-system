@@ -5,6 +5,7 @@ Quote labour hours and a parts kit for a job (e.g. **Battery R&R on a JD 333G**)
 * **Python + DuckDB** offline pipeline: Excel/CSV exports → part taxonomy → labelled segments → statistics + context-search index (about 2 minutes for 1M segments / 2.6M part lines).
 * **FastAPI** service with a quoting page at `/` and Swagger docs at `/docs`.
 * Runs in **GitHub Codespaces** with no extra services. The statistics database is a single DuckDB file.
+* **Production:** Docker image (non-root, health check, pinned dependencies), API keys, JSON logs with request ids, input limits, data validation that refuses bad exports, and a data-quality report for every build. See [Production](#production).
 
 ---
 
@@ -40,13 +41,16 @@ To refresh with a new export, replace the files in `data/raw/` and run `make pip
 
 ```bash
 curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
-  -d '{"make":"JD","model":"333G","job_text":"replace battery"}'
+  -d '{"make":"John Deere","model":"333 G","job_text":"replace battery"}'
 ```
 
 ```jsonc
 {
   "jobs": ["BATTERY"],
-  "total":  {"p25_hours": …, "p50_hours": …, "p80_hours": …, "p90_hours": …, "method": "single_job"},
+  "machine": {"make": "JD", "model": "333G", "series": "333G", "base_model": "333", "make_entered": "John Deere", …},
+  "total":  {"p25_hours": …, "p50_hours": …, "p80_hours": …, "p90_hours": …, "method": "…", "location": "ALL"},
+  "by_location": {"SHOP":    {"p50_hours": …, "p80_hours": …, "sample_size": …, "confidence": "high"},
+                  "OFFSITE": {"p50_hours": …, "p80_hours": …, "sample_size": …, "confidence": "medium"}},
   "labor":  [{"display_name": "Battery R&R", "level_used": "model", "sample_size": …, "confidence": "high",
               "basis": [{"level": "model", "key": "JD|333G", "n": …}, {"level": "base", "key": "JD|333"}, …]}],
   "parts":  [{"job_code": "BATTERY", "kit": [{"part_number": "…", "qty": 1, "attach_rate": …}], "optional": […]}],
@@ -56,6 +60,8 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
 ```
 
 * **P50** is the typical job. **P80** is a safe quote: in backtests about 80 % of real jobs came in at or under it.
+* **Shop vs off-site.** Every quote includes `by_location` with separate hours for shop and off-site (field) work, from the ShopOffsite field of past segments. Send `"location": "shop"` or `"offsite"` to make that location the headline number. Off-site travel is a separate job (`TRAVEL`); quote it as well if the call needs it.
+* **Make and model can be written any way.** "John Deere", "Deere", "JDE" → `JD`; "135G LC", "135G-LC" → `135GLC`. `GET /machines/resolve?make=…&model=…` shows how an entry is read. See [Messy makes and models](#messy-makes-and-models).
 * `job_text` is free text, in English or French, and is matched by **meaning**, not word for word. `"VALVE LASH ADJUSTMENT"` also finds past segments written `"SET ENGINE VALVES"`, `"ADJUST VALVE CLEARANCE"`, `"PERFORM VALVE SET"` and `"AJUSTEMENT DES VALVES"`. It works for any job that appears in your history, not only the job list.
 * `match`: `auto` (default) uses the context match when past work matches well, otherwise the fixed job list. `context` forces the context match; `job` uses only the job list (battery, starter, PM_500 …). The other method's answer is attached for comparison (`job_list_check` / `context_check`).
 * **Parts only.** Send `part_numbers` with no description, e.g. `{"make":"JD","model":"333G","part_numbers":["TY25879B"]}`. The quote comes from past segments that used the same parts. Parts are weighted by how much they say about the job: a starter identifies the repair, an o-ring barely does. The response shows what those parts were used for ("REPLACE BATTERY", "D/R NO START" …).
@@ -78,8 +84,9 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
 | GET | `/quotes/{id}` · POST `/quotes/{id}/actual` | Read a saved quote / record actual hours |
 | GET | `/diagnose?symptom=no start&make=JD&model=333G` | Which repairs usually fix a symptom |
 | GET | `/jobs?q=batt` · `/makes` · `/models?make=JD&q=333` | Search / autocomplete |
-| GET | `/health` · `/meta` · `/accuracy` | Status, build info, quote accuracy |
-| POST | `/admin/reload` | Reload after re-running the pipeline |
+| GET | `/machines/resolve?make=John Deere&model=135G LC` | How a make/model entry is standardised |
+| GET | `/health` (liveness) · `/ready` (data loaded) · `/version` · `/meta` · `/accuracy` | Operations |
+| POST | `/admin/reload` (header `X-Admin-Key`) | Reload after re-running the pipeline |
 
 ---
 
@@ -115,7 +122,7 @@ Diagnose and inspection are dropped when the real repair is present. Segments wi
 
 A query takes the tightest similarity cut that still leaves ≥ 40 past segments. Hours are weighted by how close each description is, and then blended model → base → make+division → division → all, exactly like job-list quotes.
 
-**3. Statistics.** Only invoiced segments are used, Expense jobs are excluded, and hour outliers are removed with a robust z-score on log hours per job. Percentiles are computed at 5 levels: model → base model (333G → 333) → make+division → division → all. A quote **blends** the levels, `est = (n·level + k·parent)/(n + k)` with k = 8, so 4 battery jobs on a rare model are pulled toward what similar machines take.
+**3. Statistics.** Only invoiced segments are used, Expense jobs and future invoice dates are excluded, and hour outliers are removed with a robust z-score on log hours per job. Percentiles are computed at 6 levels, overall and separately for shop and off-site: model (135GLC) → series (135G) → base model (135) → make+division → division → all. A quote **blends** the levels, `est = (n·level + k·parent)/(n + k)` with k = 8, so 4 battery jobs on a rare model are pulled toward what similar machines take.
 
 Combined jobs come from history when the combination has ≥ 10 cases. Otherwise the per-job hours are added and multiplied by an overlap factor learned from multi-repair segments (shared access time).
 
@@ -135,6 +142,53 @@ Combined jobs come from history when the combination has ≥ 10 cases. Otherwise
 
 Per-segment hours are noisy because scope varies inside a job like "replace hose". The next gain needs richer scope inputs (machine hours, which hose or cylinder) or a model trained on description text.
 
+## Messy makes and models
+
+The exports contain the same brand under many spellings: JD, JDE, DEERE, JOHN, "JD #2", and names cut to 5 letters (HITAC, DOOSA, TOYOT). Models are also written several ways: "470G LC", "470GLC", "544 P". `normalize.py` handles this in four layers, during the pipeline and on every request:
+
+1. **Deterministic clean-up.** Upper-case, accents and punctuation removed, unit numbers ("#2") dropped. The model key keeps only letters and digits, so `470G LC` = `470GLC` = `470g-lc`.
+2. **Your aliases.** `config/make_aliases.csv` (`JOHN DEERE,JD`) and `config/model_aliases.csv` (`JD,135G LC,135GLC`).
+3. **Automatic merges, only with evidence.** A rare spelling is folded into a big make only when its machines are that make's models. That means ≥ 50 % model overlap plus a prefix or near-spelling relationship (JDE → JD, HITAC → HIT), or ≥ 80 % overlap for small spellings. Notes typed into the make field on JD models ("SALES", "EXP", "2024") end up under JD this way. Short unrelated codes are left alone.
+4. **Review.** Each build writes `data/review/make_mapping.csv`, listing every merged spelling with its method, segment count and model overlap. It also writes `model_variants.csv`, listing every model written more than one way. If a decision is wrong, add a line to the alias files and rebuild.
+
+Variants are not forced together. **135G and 135GLC stay separate models in the same series (135G)**, so a 135GLC quote uses 135GLC history first and borrows from 135G and then the 135 family only as needed. Requests go through the same rules: "Hitachi" → HIT by prefix, and an unknown model like "135GX" falls back to its series/base. The response shows what was entered and how it was read.
+
+## Production
+
+**Run with Docker** (any Linux host or VM; nothing else to install):
+
+```bash
+cp .env.example .env            # set QS_API_KEYS and QS_ADMIN_KEY (long random values)
+mkdir -p data/raw && cp /path/to/workorders.xlsx /path/to/parts.xlsx data/raw/
+sudo chown -R 10001:10001 data  # the container runs as non-root user 10001
+docker compose build
+docker compose run --rm pipeline          # validate + build statistics (2-3 min)
+docker compose up -d api                  # http://<host>:8000  (put HTTPS in front, see below)
+```
+
+**Refresh with a new export:** copy the new files into `data/raw/`, run `docker compose run --rm pipeline`, then `curl -X POST -H "X-Admin-Key: …" http://<host>:8000/admin/reload`. You can also restart the API instead of calling reload. The new database is swapped in atomically, so a running API never sees a half-built one.
+
+**Bad exports are refused.** The build stops and the live database stays unchanged when:
+* there are too few segments or part lines;
+* models or hours are mostly empty;
+* fewer than half the part orders match a work order (files from different periods);
+* segments drop more than 30 % versus the previous build.
+
+Use `--force` only when the change is intended. Every build writes `data/review/data_quality.md` and `build_manifest.json`. These record input file hashes, volumes, what was excluded and why, the make/model merges and the labelling counts.
+
+| Area | What is in place |
+|---|---|
+| Security | API keys (`X-API-Key`, constant-time compare) for every API call; separate admin key for reload; non-root container; no company data in the image (data is a volume; `.dockerignore`/`.gitignore` block exports); input size limits on every field; CORS off unless `QS_CORS_ORIGINS` is set |
+| Observability | JSON logs (`QS_LOG_JSON=1`): one line per request with request id, path, status, latency; `X-Request-ID` echoed back; unhandled errors logged with stack trace, client gets `{"detail":"internal error","request_id":…}` |
+| Health | `/health` liveness (container `HEALTHCHECK`), `/ready` returns 503 until statistics are loaded (use for load balancers), `/version` |
+| Reliability | pinned dependencies (`requirements.lock`); quote log in SQLite WAL mode (safe for several workers); atomic database swap; reload without restart |
+| Quality gates | CI runs ruff and 31 tests, then builds the image and smoke-tests it: pipeline on synthetic data, auth required, a real quote, admin reload |
+| Sizing | about 1 GB RAM per API worker (`QS_WORKERS`, default 2) and ~2.5 GB during a build; quotes take 0.05–0.3 s |
+
+**Put HTTPS in front.** Use the company reverse proxy, IIS/ARR, nginx, an Azure App Gateway or similar, and forward to port 8000. The app trusts `X-Forwarded-*` headers from the proxy. For SSO, let the proxy authenticate users, and keep API keys for system-to-system calls.
+
+**Scaling beyond one server.** The statistics file is read-only, so any number of API instances can share a copy. The quote log (`quotes.sqlite`) is the one piece of writable state. When several servers must share it, move it to Postgres.
+
 ## Tuning without code
 
 | File | What to change |
@@ -144,6 +198,7 @@ Per-segment hours are noisy because scope varies inside a job like "replace hose
 | `config/jobs.csv` | Job list, display names, text patterns (EN/FR), exclusions, search synonyms |
 | `config/synonyms.csv` | Phrases that mean the same job for the context match (valve lash = valve set = valve clearance) |
 | `config/symptoms.csv` | Symptom patterns (NO_START, HYD_LEAK, …) |
+| `config/make_aliases.csv` · `config/model_aliases.csv` | Make / model spellings that mean the same machine |
 | env vars (`QS_*`, see `src/quote_system/config.py`) | Thresholds: shrinkage k, kit attach rates, outlier cut-off, excluded sales types |
 
 The pipeline writes `part_taxonomy` (with `source` = rule / rule_verified / text_vote / override) into the database. You can review it with:
@@ -158,6 +213,8 @@ python -c "import duckdb; print(duckdb.connect('data/quote.duckdb', read_only=Tr
 config/                  editable rules (CSV)
 src/quote_system/
   ingest.py              Excel/CSV → parquet (header detection, column aliases)
+  validate.py            refuse bad exports, data-quality report, build manifest
+  normalize.py           make / model standardisation (aliases, evidence-based merges, series level)
   labeling.py            part taxonomy + segment job labelling
   stats.py               labour stats, kits, symptom tables
   pipeline.py            orchestrates the above → data/quote.duckdb

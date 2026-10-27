@@ -16,25 +16,38 @@ import duckdb
 import numpy as np
 
 from .config import Settings
+from .normalize import MakeResolver, base_of, model_key, series_of
 from .rules import jobs_from_text, normalize_text, symptoms_from_text
 from .textsearch import TextIndex, index_dir_for
 
-LEVEL_ORDER = ("global", "division", "make_div", "base", "model")  # least -> most specific
+LEVEL_ORDER = ("global", "division", "make_div", "base", "series", "model")  # least -> most specific
+LOCATIONS = {"SHOP": "Shop", "OFFSITE": "Off site"}
 PCTS = ("p25", "p50", "p80", "p90")
 
 
-def base_model_of(model: str) -> str:
-    stripped = re.sub(r"[A-Z]+$", "", model)
-    return stripped if re.search(r"[0-9]", stripped) else model
+def normalize_location(loc: str | None) -> str | None:
+    if not loc:
+        return None
+    t = normalize_text(loc).replace(" ", "").replace("-", "")
+    if t.startswith("SHOP"):
+        return "SHOP"
+    if t.startswith(("OFF", "FIELD", "SITE", "ONSITE")):
+        return "OFFSITE"
+    raise ValueError(f"location must be 'shop' or 'offsite', got {loc!r}")
 
 
 @dataclass
 class Machine:
     make: str
-    model: str
-    base_model: str
+    model: str            # canonical model key, e.g. 135GLC
+    series: str           # 135G
+    base_model: str       # 135
     division: str | None
     known_model: bool
+    display_model: str = ""
+    make_input: str = ""
+    model_input: str = ""
+    make_resolution: str = "exact"
 
     def key(self, level: str) -> str | None:
         if level == "global":
@@ -45,7 +58,20 @@ class Machine:
             return f"{self.make}|{self.division}" if self.division else None
         if level == "base":
             return f"{self.make}|{self.base_model}"
+        if level == "series":
+            return f"{self.make}|{self.series}"
         return f"{self.make}|{self.model}"
+
+    def as_dict(self) -> dict:
+        d = {"make": self.make, "model": self.display_model or self.model, "model_key": self.model,
+             "series": self.series, "base_model": self.base_model, "division": self.division,
+             "known_model": self.known_model}
+        if self.make_input and (normalize_text(self.make_input) != self.make or self.make_resolution != "exact"):
+            d["make_entered"] = self.make_input
+            d["make_resolved_by"] = self.make_resolution
+        if self.model_input and normalize_text(self.model_input) != (self.display_model or self.model):
+            d["model_entered"] = self.model_input
+        return d
 
 
 def _wquantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
@@ -89,13 +115,24 @@ class QuoteEngine:
     def _load(self) -> None:
         c = self.con.cursor()
         self.stats: dict[tuple[str, str, str], dict] = {}
-        for row in c.execute("select level, job_key, key, n, p25, p50, p80, p90, mean, eq_n, eq_p50 from labor_stats").fetchall():
-            lvl, job, key, n, p25, p50, p80, p90, mean, eq_n, eq_p50 = row
-            self.stats[(job, lvl, key)] = {"n": n, "p25": p25, "p50": p50, "p80": p80, "p90": p90,
-                                           "mean": mean, "eq_n": eq_n, "eq_p50": eq_p50}
-        self.models: dict[tuple[str, str], tuple[str, str, int]] = {
-            (mk, md): (base, div, n) for mk, md, base, div, n in
-            c.execute("select make, model, base_model, division, n_segments from models").fetchall()}
+        self.stats_loc: dict[tuple[str, str, str, str], dict] = {}
+        for row in c.execute("select level, job_key, key, location, n, p25, p50, p80, p90, mean, eq_n, eq_p50 "
+                             "from labor_stats").fetchall():
+            lvl, job, key, loc, n, p25, p50, p80, p90, mean, eq_n, eq_p50 = row
+            st = {"n": n, "p25": p25, "p50": p50, "p80": p80, "p90": p90, "mean": mean, "eq_n": eq_n, "eq_p50": eq_p50}
+            if loc == "ALL":
+                self.stats[(job, lvl, key)] = st
+            else:
+                self.stats_loc[(job, lvl, key, loc)] = st
+        self.models: dict[tuple[str, str], dict] = {
+            (mk, md): {"series": ser, "base": base, "division": div, "n": n, "display": disp or md}
+            for mk, md, ser, base, div, n, disp in
+            c.execute("select make, model, series, base_model, division, n_segments, display_model from models").fetchall()}
+        make_totals: dict[str, int] = {}
+        for (mk, _), v in self.models.items():
+            make_totals[mk] = make_totals.get(mk, 0) + v["n"]
+        make_map = dict(c.execute("select raw_clean, canonical from make_map").fetchall())
+        self.makes_resolver = MakeResolver(make_map, make_totals, str(self.settings.config_dir))
         self.catalog = {code: {"job_code": code, "display_name": name, "category": cat,
                                "synonyms": [s for s in (syn or "").split(";") if s]}
                         for code, name, cat, syn in
@@ -110,21 +147,32 @@ class QuoteEngine:
 
     # ------------------------------------------------------------------ machines
     def machine(self, make: str, model: str, division: str | None = None) -> Machine:
-        mk, md = normalize_text(make), normalize_text(model)
+        """'John Deere' / '135G LC' -> JD / 135GLC (series 135G, base 135), same rules as the pipeline."""
+        mk, how = self.makes_resolver.resolve(make)
+        md = model_key(model)
         hit = self.models.get((mk, md))
         if hit:
-            base, div, _ = hit
-            return Machine(mk, md, base, division or div, True)
-        base = base_model_of(md)
-        # unknown model: borrow the division from models sharing the base model (e.g. 333G -> 333)
-        divs = [(n, d) for (m2, _), (b2, d, n) in self.models.items() if m2 == mk and b2 == base]
-        if not divs:
-            divs = [(n, d) for (m2, _), (_, d, n) in self.models.items() if m2 == mk]
-        div = division or (max(divs)[1] if divs else None)
-        return Machine(mk, md, base, div, False)
+            return Machine(mk, md, hit["series"], hit["base"], division or hit["division"], True, hit["display"],
+                           make, model, how)
+        ser = series_of(md)
+        base = base_of(ser)
+        # unknown model: borrow the division from models of the same series, then base model, then make
+        div = division
+        if not div:
+            for pick in (lambda v: v["series"] == ser, lambda v: v["base"] == base, lambda v: True):
+                cands = [(v["n"], v["division"]) for (m2, _), v in self.models.items() if m2 == mk and pick(v)]
+                if cands:
+                    div = max(cands)[1]
+                    break
+        return Machine(mk, md, ser, base, div, False, "", make, model, how)
 
     # ------------------------------------------------------------------ labour
-    def labor_estimate(self, job_key: str, m: Machine) -> dict | None:
+    def _stat(self, job_key: str, lvl: str, key: str, location: str | None) -> dict | None:
+        if location:
+            return self.stats_loc.get((job_key, lvl, key, location))
+        return self.stats.get((job_key, lvl, key))
+
+    def labor_estimate(self, job_key: str, m: Machine, location: str | None = None) -> dict | None:
         k = self.settings.shrink_k
         est: dict | None = None
         basis = []
@@ -133,7 +181,7 @@ class QuoteEngine:
             key = m.key(lvl)
             if key is None:
                 continue
-            s = self.stats.get((job_key, lvl, key))
+            s = self._stat(job_key, lvl, key, location)
             if not s:
                 continue
             basis.append({"level": lvl, "key": key, "n": s["n"], "p50": round(s["p50"], 2), "p80": round(s["p80"], 2)})
@@ -146,8 +194,9 @@ class QuoteEngine:
                 used_level, used_n = lvl, s["n"]
         if est is None:
             return None
-        n_model = (self.stats.get((job_key, "model", m.key("model"))) or {}).get("n", 0)
-        n_base = (self.stats.get((job_key, "base", m.key("base"))) or {}).get("n", 0)
+        n_model = (self._stat(job_key, "model", m.key("model"), location) or {}).get("n", 0)
+        n_base = max((self._stat(job_key, "series", m.key("series"), location) or {}).get("n", 0),
+                     (self._stat(job_key, "base", m.key("base"), location) or {}).get("n", 0))
         if n_model >= 20:
             conf = "high"
         elif n_model >= 5 or n_base >= 20:
@@ -157,7 +206,7 @@ class QuoteEngine:
         eq = None
         for lvl in reversed(LEVEL_ORDER):
             key = m.key(lvl)
-            s = self.stats.get((job_key, lvl, key)) if key is not None else None
+            s = self._stat(job_key, lvl, key, location) if key is not None else None
             if s and (s["eq_n"] or 0) >= 3:
                 eq = {"level": lvl, "n": s["eq_n"], "p50": round(s["eq_p50"], 2)}
                 break
@@ -169,15 +218,15 @@ class QuoteEngine:
             "historical_eq_hours": eq, "basis": list(reversed(basis)),
         }
 
-    def combo_estimate(self, jobs: list[str], m: Machine) -> dict | None:
+    def combo_estimate(self, jobs: list[str], m: Machine, location: str | None = None) -> dict | None:
         key = "+".join(sorted(jobs))
-        g = self.stats.get((key, "global", ""))
+        g = self._stat(key, "global", "", location)
         if g and g["n"] >= self.settings.combo_min_n:
-            e = self.labor_estimate(key, m)
+            e = self.labor_estimate(key, m, location)
             if e:
                 e["method"] = "historical_combo"
                 return e
-        singles = [self.labor_estimate(j, m) for j in jobs]
+        singles = [self.labor_estimate(j, m, location) for j in jobs]
         singles = [s for s in singles if s]
         if not singles:
             return None
@@ -194,7 +243,7 @@ class QuoteEngine:
     # ------------------------------------------------------------------ parts
     def parts_kit(self, job: str, m: Machine) -> dict:
         c = self.cursor()
-        for lvl in ("model", "base", "make_div"):
+        for lvl in ("model", "series", "base", "make_div"):
             key = m.key(lvl)
             if key is None:
                 continue
@@ -229,15 +278,16 @@ class QuoteEngine:
     # ------------------------------------------------------------------ evidence
     def similar(self, job_key: str, m: Machine, limit: int = 5) -> list[dict]:
         c = self.cursor()
-        for col, val in (("model", m.model), ("base_model", m.base_model)):
+        for col, val in (("model", m.model), ("series", m.series), ("base_model", m.base_model)):
             rows = c.execute(f"""
-                select service_order_id, wo_number, wo_segment, branch, invoice_date, description, actual_hours, eq_hours, model
+                select service_order_id, wo_number, wo_segment, branch, invoice_date, description, actual_hours, eq_hours,
+                       coalesce(model_raw, model), location
                 from segments where job_key = ? and make = ? and {col} = ? and status = 'Invoiced' and actual_hours > 0
                 order by invoice_date desc limit ?""", [job_key, m.make, val, limit]).fetchall()
             if rows:
                 return [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
                          "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[6],
-                         "eq_hours": r[7], "model": r[8]} for r in rows]
+                         "eq_hours": r[7], "model": r[8], "location": r[9]} for r in rows]
         return []
 
     # ------------------------------------------------------------------ resolution / search
@@ -273,18 +323,19 @@ class QuoteEngine:
         return [{**j, "history_segments": vol} for _, vol, j in scored[:limit]]
 
     def search_models(self, make: str | None, q: str = "", limit: int = 20) -> list[dict]:
-        mk = normalize_text(make) if make else None
-        t = normalize_text(q)
-        hits = [(n, m2, md, base, div) for (m2, md), (base, div, n) in self.models.items()
+        mk = self.makes_resolver.resolve(make)[0] if make else None
+        t = model_key(q) if q else ""
+        t = "" if t == "UNKNOWN" else t
+        hits = [(v["n"], m2, md, v) for (m2, md), v in self.models.items()
                 if (mk is None or m2 == mk) and (not t or md.startswith(t) or t in md)]
         hits.sort(key=lambda x: (not x[2].startswith(t), -x[0]))
-        return [{"make": m2, "model": md, "base_model": base, "division": div, "segments": n}
-                for n, m2, md, base, div in hits[:limit]]
+        return [{"make": m2, "model": v["display"], "model_key": md, "series": v["series"], "base_model": v["base"],
+                 "division": v["division"], "segments": n} for n, m2, md, v in hits[:limit]]
 
     def makes(self) -> list[dict]:
         agg: dict[str, int] = {}
-        for (mk, _), (_, _, n) in self.models.items():
-            agg[mk] = agg.get(mk, 0) + n
+        for (mk, _), v in self.models.items():
+            agg[mk] = agg.get(mk, 0) + v["n"]
         return [{"make": k, "segments": v} for k, v in sorted(agg.items(), key=lambda x: -x[1])]
 
     # ------------------------------------------------------------------ diagnose
@@ -320,11 +371,11 @@ class QuoteEngine:
 
     # ------------------------------------------------------------------ quote
     def quote(self, make: str, model: str, jobs: list[str], include_parts: bool = True,
-              division: str | None = None) -> dict:
+              division: str | None = None, location: str | None = None) -> dict:
         m = self.machine(make, model, division)
         labor, missing = [], []
         for j in jobs:
-            e = self.labor_estimate(j, m)
+            e = self.labor_estimate(j, m, location) or (self.labor_estimate(j, m) if location else None)
             if e:
                 e["display_name"] = self.catalog.get(j, {}).get("display_name", j)
                 labor.append(e)
@@ -335,7 +386,7 @@ class QuoteEngine:
             total = {k: labor[0][k] for k in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")}
             total["method"] = "single_job"
         elif len(jobs) > 1:
-            ce = self.combo_estimate(jobs, m)
+            ce = self.combo_estimate(jobs, m, location) or (self.combo_estimate(jobs, m) if location else None)
             if ce:
                 total = {k: ce[k] for k in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")}
                 total["method"] = ce["method"]
@@ -348,23 +399,37 @@ class QuoteEngine:
         evidence = self.similar(key, m) or (self.similar(jobs[0], m) if jobs else [])
         warnings = []
         if not m.known_model:
-            warnings.append(f"Model {m.model} not in history; using base model {m.base_model} / division {m.division}.")
+            warnings.append(f"Model {m.model} not in history; using series {m.series} / base model {m.base_model} / division {m.division}.")
         if missing:
             warnings.append(f"No history for: {', '.join(missing)}")
-        if any(l["confidence"] == "low" for l in labor):
+        if any(lab["confidence"] == "low" for lab in labor):
             warnings.append("Low confidence: little history for this job on this machine - review before sending.")
+        by_location = {}
+        for loc, label in LOCATIONS.items():
+            if len(jobs) == 1:
+                e = self.labor_estimate(jobs[0], m, loc)
+            else:
+                e = self.combo_estimate(jobs, m, loc) if jobs else None
+            if e:
+                by_location[loc] = {"label": label, **{k: e[k] for k in ("p25_hours", "p50_hours", "p80_hours",
+                                                                         "p90_hours", "level_used", "sample_size",
+                                                                         "confidence")}}
+        if total is not None:
+            total["location"] = location or "ALL"
         return {
-            "machine": {"make": m.make, "model": m.model, "base_model": m.base_model, "division": m.division,
-                        "known_model": m.known_model},
-            "jobs": jobs, "labor": labor, "total": total, "parts": parts,
+            "machine": m.as_dict(),
+            "jobs": jobs, "labor": labor, "total": total, "by_location": by_location, "parts": parts,
             "parts_included": include_parts, "similar_work_orders": evidence, "warnings": warnings,
         }
 
     # ------------------------------------------------------------------ context (similar-history) quotes
+    # row layout used by context / parts quotes (indexes below)
     POOL_COLS = """service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
-                   make, model, base_model, division, actual_hours, eq_hours"""
+                   make, model, base_model, division, actual_hours, eq_hours, series, location, model_raw"""
+    N_POOL = 16
 
-    def similar_quote(self, text: str, m: Machine, include_parts: bool = True) -> dict | None:
+    def similar_quote(self, text: str, m: Machine, include_parts: bool = True,
+                      location: str | None = None) -> dict | None:
         """Quote from past segments whose description *means* the same thing as ``text``.
 
         Works for any job, including ones with no job code ('VALVE LASH ADJUSTMENT')."""
@@ -386,7 +451,7 @@ class QuoteEngine:
         if not rows:
             return None
         weights = {r[0]: score_of.get(r[6], 0.0) for r in rows}
-        out = self._pool_quote(rows, weights, m, include_parts, text.strip(), best)
+        out = self._pool_quote(rows, weights, m, include_parts, text.strip(), best, location)
         if out is None:
             return None
         model_rows = out.pop("_model_rows")
@@ -425,7 +490,7 @@ class QuoteEngine:
         return known, unknown
 
     def parts_quote(self, part_numbers: list[str], m: Machine, include_parts: bool = True,
-                    text: str | None = None) -> dict | None:
+                    text: str | None = None, location: str | None = None) -> dict | None:
         """Labour from past segments that used the same parts (idf-weighted cosine: a starter
         identifies a job, an o-ring barely does). Optional ``text`` re-ranks by description.
 
@@ -446,12 +511,12 @@ class QuoteEngine:
                     comp_of[k_["part_number"]] = base[0]["component"]
         comps = sorted(set(comp_of.values()))
         if len(comps) < 2:
-            return self._parts_pool(known, unknown, m, include_parts, text)
+            return self._parts_pool(known, unknown, m, include_parts, text, location)
         others = [k_ for k_ in known if k_["part_number"] not in comp_of]
         subs = []
         for c in comps:
             grp = [k_ for k_ in known if comp_of.get(k_["part_number"]) == c] + others
-            sub = self._parts_pool(grp, [], m, include_parts, text)
+            sub = self._parts_pool(grp, [], m, include_parts, text, location)
             if sub:
                 subs.append((c, sub))
         if not subs:
@@ -468,14 +533,23 @@ class QuoteEngine:
                 factor, how = g["p50"] / sum(x["p50"] for x in single_g), f"{g['n']} past {combo_key} jobs"
         total = {p: round(max(max(t[p] for t in singles), sum(t[p] for t in singles) * factor), 2)
                  for p in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")}
-        total.update({"method": "parts_history_combined", "overlap_factor": round(factor, 3), "overlap_basis": how})
+        total.update({"method": "parts_history_combined", "overlap_factor": round(factor, 3), "overlap_basis": how,
+                      "location": subs[0][1]["total"].get("location", "ALL")})
+        by_location = {}
+        for loc, label in LOCATIONS.items():
+            parts_ = [sub["by_location"].get(loc) for _, sub in subs]
+            if all(parts_):
+                by_location[loc] = {"label": label, **{p: round(max(max(x[p] for x in parts_), sum(x[p] for x in parts_) * factor), 2)
+                                                       for p in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")},
+                                    "level_used": "per-repair", "sample_size": min(x["sample_size"] for x in parts_),
+                                    "confidence": min((x["confidence"] for x in parts_), key=["low", "medium", "high"].index)}
         first = subs[0][1]
         warnings = [f"Parts cover {len(subs)} repairs ({', '.join(c for c, _ in subs)}): quoted separately and combined."]
         if unknown:
             warnings.append(f"Not found in parts history (ignored): {', '.join(map(str, unknown))}")
         return {
             "mode": "parts_history", "query": text or "", "machine": first["machine"], "jobs": [],
-            "labor": [l for _, sub in subs for l in sub["labor"]], "total": total,
+            "labor": [lab for _, sub in subs for lab in sub["labor"]], "total": total, "by_location": by_location,
             "parts": [p for _, sub in subs for p in sub["parts"]], "parts_included": include_parts,
             "matched_segments": sum(sub["matched_segments"] for _, sub in subs),
             "matched_descriptions": [d for _, sub in subs for d in sub["matched_descriptions"][:8]],
@@ -491,7 +565,7 @@ class QuoteEngine:
         }
 
     def _parts_pool(self, known: list[dict], unknown: list, m: Machine, include_parts: bool,
-                    text: str | None) -> dict | None:
+                    text: str | None, location: str | None = None) -> dict | None:
         qnorm = float(np.sqrt(sum(k_["idf"] ** 2 for k_ in known)))
         rows = self.cursor().execute(f"""
             with q as (select unnest(?) as part_number, unnest(?) as idf),
@@ -505,7 +579,7 @@ class QuoteEngine:
         """, [[k_["part_number"] for k_ in known], [k_["idf"] for k_ in known], qnorm]).fetchall()
         if not rows:
             return None
-        scores = {r[0]: float(r[13]) for r in rows}
+        scores = {r[0]: float(r[self.N_POOL]) for r in rows}
         if text and self.text_index is not None:
             ts = self.text_index.score_texts(text, list({r[6] for r in rows}))
             scores = {r[0]: scores[r[0]] * (0.5 + 0.5 * ts.get(r[6], 0.0)) for r in rows}
@@ -515,14 +589,14 @@ class QuoteEngine:
             chosen = [r for r in ranked if scores[r[0]] >= max(frac * best, 0.2)]
             if len(chosen) >= self.settings.similar_min_pool:
                 break
-        rows = [r[:13] for r in chosen]
+        rows = [r[:self.N_POOL] for r in chosen]
         if not rows:
             return None
         title = ", ".join(f"{k_['part_number']}" + (f" ({k_['description']})" if k_["description"] else "") for k_ in known)
         main = sorted({k_["component"] for k_ in known if k_["role"] == "primary" and k_["component"]})
         title = (" + ".join(self.catalog.get(c, {}).get("display_name", c) for c in main) + f" (parts {title})"
                  if main else f"Parts {title}")
-        out = self._pool_quote(rows, scores, m, include_parts, title, best)
+        out = self._pool_quote(rows, scores, m, include_parts, title, best, location)
         if out is None:
             return None
         model_rows = out.pop("_model_rows")
@@ -573,7 +647,7 @@ class QuoteEngine:
             g["model_n"] += r[0] in on_model
             g["variants"][raw] = g["variants"].get(raw, 0) + 1
         scored = []
-        for key, g in groups.items():
+        for g in groups.values():
             text = max(g["variants"].items(), key=lambda x: (x[1], -len(x[0])))[0]
             score = g["n"] + 2 * g["model_n"]
             if not self._ACTION_RE.search(text):
@@ -600,25 +674,20 @@ class QuoteEngine:
         return out
 
     # ------------------------------------------------------------------ shared: quote from a pool of past segments
-    def _pool_quote(self, rows: list, weights: dict, m: Machine, include_parts: bool, title: str,
-                    best: float) -> dict | None:
-        hours = np.array([r[11] for r in rows], dtype=float)
-        lh = np.log(hours)
-        med = np.median(lh)
-        mad = max(1.4826 * np.median(np.abs(lh - med)), 0.1)
-        keep = np.abs(lh - med) / mad <= self.settings.outlier_mad_z
-        rows = [r for r, k_ in zip(rows, keep) if k_]
-        keys = {
-            "global": lambda r: "", "division": lambda r: r[10], "make_div": lambda r: f"{r[7]}|{r[10]}",
-            "base": lambda r: f"{r[7]}|{r[9]}", "model": lambda r: f"{r[7]}|{r[8]}",
-        }
+    _POOL_KEYS = {
+        "global": lambda r: "", "division": lambda r: r[10], "make_div": lambda r: f"{r[7]}|{r[10]}",
+        "base": lambda r: f"{r[7]}|{r[9]}", "series": lambda r: f"{r[7]}|{r[13]}", "model": lambda r: f"{r[7]}|{r[8]}",
+    }
+
+    def _blend(self, rows: list, weights: dict, m: Machine) -> dict | None:
+        """Closeness-weighted percentiles per level, blended model <- series <- base <- ... <- global."""
         k = self.settings.shrink_k
         est, basis, used_level, used_n, level_rows = None, [], None, 0, {}
         for lvl in LEVEL_ORDER:
             key = m.key(lvl)
             if key is None:
                 continue
-            sub = [r for r in rows if keys[lvl](r) == key]
+            sub = [r for r in rows if self._POOL_KEYS[lvl](r) == key]
             if not sub:
                 continue
             level_rows[lvl] = sub
@@ -634,36 +703,68 @@ class QuoteEngine:
         if est is None:
             return None
         n_model = len(level_rows.get("model", []))
-        n_base = len(level_rows.get("base", []))
-        conf = "high" if n_model >= 20 else "medium" if (n_model >= 5 or n_base >= 20) else "low"
+        n_mid = max(len(level_rows.get("series", [])), len(level_rows.get("base", [])))
+        conf = "high" if n_model >= 20 else "medium" if (n_model >= 5 or n_mid >= 20) else "low"
+        return {"est": est, "basis": basis, "level_used": used_level or "global", "sample_size": used_n,
+                "confidence": conf, "level_rows": level_rows}
+
+    def _pool_quote(self, rows: list, weights: dict, m: Machine, include_parts: bool, title: str,
+                    best: float, location: str | None = None) -> dict | None:
+        hours = np.array([r[11] for r in rows], dtype=float)
+        lh = np.log(hours)
+        med = np.median(lh)
+        mad = max(1.4826 * np.median(np.abs(lh - med)), 0.1)
+        keep = np.abs(lh - med) / mad <= self.settings.outlier_mad_z
+        rows = [r for r, k_ in zip(rows, keep, strict=False) if k_]
+        allb = self._blend(rows, weights, m)
+        if allb is None:
+            return None
+        by_location = {}
+        for loc, label in LOCATIONS.items():
+            b = self._blend([r for r in rows if r[14] == loc], weights, m)
+            if b:
+                by_location[loc] = {"label": label, **{f"{p}_hours": round(float(b["est"][p]), 2) for p in PCTS},
+                                    "level_used": b["level_used"], "sample_size": b["sample_size"],
+                                    "confidence": b["confidence"]}
+        main = allb
+        if location:
+            lb = self._blend([r for r in rows if r[14] == location], weights, m)
+            if lb:
+                main = lb
+        conf = main["confidence"]
         if best < 0.7 and conf != "low":
             conf = "medium" if conf == "high" else "low"
         eqs = [r[12] for r in rows if r[12] and r[12] > 0]
         labor = {
             "job_key": "SIMILAR", "display_name": title,
-            **{f"{p}_hours": round(float(est[p]), 2) for p in PCTS},
-            "level_used": used_level or "global", "sample_size": used_n, "confidence": conf,
+            **{f"{p}_hours": round(float(main["est"][p]), 2) for p in PCTS},
+            "level_used": main["level_used"], "sample_size": main["sample_size"], "confidence": conf,
             "historical_eq_hours": {"level": "global", "n": len(eqs), "p50": round(float(np.median(eqs)), 2)} if len(eqs) >= 3 else None,
-            "basis": list(reversed(basis)),
+            "basis": list(reversed(main["basis"])),
         }
+        level_rows = allb["level_rows"]
         # the most specific level with enough segments drives evidence and parts
-        spec = next((lvl for lvl in ("model", "base", "make_div", "division", "global")
+        spec = next((lvl for lvl in ("model", "series", "base", "make_div", "division", "global")
                      if len(level_rows.get(lvl, [])) >= self.settings.kit_min_segments), None) \
             or next(iter(reversed(list(level_rows))))
         pool = level_rows[spec]
         recent = sorted(pool, key=lambda r: (round(weights.get(r[0], 0), 3), r[4]), reverse=True)[:8]
         evidence = [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
                      "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[11], "eq_hours": r[12],
-                     "model": r[8], "match_score": round(weights.get(r[0], 0), 3)} for r in recent]
+                     "model": r[15] or r[8], "location": LOCATIONS.get(r[14]),
+                     "match_score": round(weights.get(r[0], 0), 3)} for r in recent]
         parts = [self._kit_from_segments([r[0] for r in pool], spec)] if include_parts else []
         warnings = []
         if not m.known_model:
-            warnings.append(f"Model {m.model} not in history; using base model {m.base_model} / division {m.division}.")
+            warnings.append(f"Model {m.model} not in history; using series {m.series} / base model {m.base_model} / division {m.division}.")
+        if location and main is allb:
+            warnings.append(f"No {LOCATIONS[location].lower()} history for this match - showing all locations.")
         return {
-            "machine": {"make": m.make, "model": m.model, "base_model": m.base_model, "division": m.division,
-                        "known_model": m.known_model},
+            "machine": m.as_dict(),
             "jobs": [], "labor": [labor],
-            "total": {k2: labor[k2] for k2 in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")},
+            "total": {k2: labor[k2] for k2 in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")}
+                     | {"location": location if (location and main is not allb) else "ALL"},
+            "by_location": by_location,
             "parts": parts, "parts_included": include_parts, "matched_segments": len(rows),
             "similar_work_orders": evidence, "warnings": warnings, "_model_rows": level_rows.get("model", []),
         }

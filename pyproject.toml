@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27", "openpyxl>=3.1"]
+dev = ["pytest>=8", "httpx>=0.27", "openpyxl>=3.1", "ruff>=0.6"]
 
 [project.scripts]
 qs-pipeline = "quote_system.pipeline:main"
@@ -38,3 +38,22 @@ quote_system = ["api/static/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore:Using `httpx` with:UserWarning"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = [
+  "S608",  # SQL is built from our own config/constants, values go through parameters
+  "S101",  # asserts in tests
+  "B008",  # FastAPI Depends/Query in defaults
+  "E731",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+"src/quote_system/sample_data.py" = ["S311"]
+"src/quote_system/backtest.py" = ["S311"]

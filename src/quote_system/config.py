@@ -39,8 +39,19 @@ class Settings:
     kit_optional_attach: float = _env("QS_KIT_OPTIONAL_ATTACH", 0.2)
     stats_statuses: str = _env("QS_STATS_STATUSES", "Invoiced")   # comma separated
     stats_exclude_sales_types: str = _env("QS_STATS_EXCLUDE_SALES_TYPES", "Expense")  # comma separated
+    min_segments: int = _env("QS_MIN_SEGMENTS", 1000)           # validation: refuse smaller exports
+    min_part_lines: int = _env("QS_MIN_PART_LINES", 1000)
+    max_drop: float = _env("QS_MAX_DROP", 0.3)                    # refuse a build that loses >30% of segments
     combo_min_n: int = _env("QS_COMBO_MIN_N", 10)                # history needed to quote a combo directly
     similar_min_pool: int = _env("QS_SIMILAR_MIN_POOL", 40)      # segments wanted before loosening the text match
+
+    # --- service (read at start-up, so tests / containers can set them per process) ---
+    api_keys: str = field(default_factory=lambda: os.environ.get("QS_API_KEYS", ""))      # comma separated; empty = auth off
+    admin_key: str = field(default_factory=lambda: os.environ.get("QS_ADMIN_KEY", ""))    # required for /admin/*
+    cors_origins: str = field(default_factory=lambda: os.environ.get("QS_CORS_ORIGINS", ""))
+    log_json: bool = field(default_factory=lambda: os.environ.get("QS_LOG_JSON", "0") in {"1", "true", "yes"})
+    log_level: str = field(default_factory=lambda: os.environ.get("QS_LOG_LEVEL", "INFO"))
+    version: str = field(default_factory=lambda: os.environ.get("QS_VERSION", "dev"))
 
     def ensure_dirs(self) -> None:
         self.work_dir.mkdir(parents=True, exist_ok=True)

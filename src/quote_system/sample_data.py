@@ -70,7 +70,13 @@ def generate(out_dir: Path, n_wo: int = 2500, seed: int = 7) -> tuple[Path, Path
             opened = start + timedelta(days=rnd.randint(0, 900))
             sid = f"S1{wo:08d}{seg:03d}0101"
             eq = act if rnd.random() < 0.4 else 0
-            wo_rows.append(["CA", wo, seg, sid, div, rnd.choice(["Shop", "Off site"]), make, model,
+            # real exports are messy: the same brand / model written several ways
+            mk_written = rnd.choices([make, "JDE", "DEERE", "JD #2", "John Deere"], weights=[90, 3, 3, 2, 2])[0]
+            md_written = rnd.choices([model, model[:-1] + " " + model[-1], model.lower()], weights=[90, 6, 4])[0]
+            loc = "Off site" if kind == "travel" or rnd.random() < 0.25 else "Shop"
+            if loc == "Off site":
+                act = round(act * 1.2 * 4) / 4  # field work runs a little longer
+            wo_rows.append(["CA", wo, seg, sid, div, loc, mk_written, md_written,
                             rnd.randint(100, 9000), desc, rnd.choice(["Charge", "Cash", "Warranty", "Internal"]),
                             "Invoiced", opened, opened + timedelta(days=rnd.randint(1, 20)), eq,
                             rnd.choice(["Regina", "Saskatoon", "Edmonton CCE"]), act])

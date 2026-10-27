@@ -51,7 +51,7 @@ def test_combo_quote(client):
     r = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "battery and starter R&R", "match": "job"})
     q = r.json()
     assert sorted(q["jobs"]) == ["BATTERY", "STARTER"]
-    single = max(l["p50_hours"] for l in q["labor"])
+    single = max(lab["p50_hours"] for lab in q["labor"])
     assert q["total"]["p50_hours"] >= single
 
 
@@ -137,7 +137,7 @@ def test_parts_for_two_repairs_are_combined(client):
                                      "part_numbers": ["TY25879B", "SE501406", "CRSE501406"]}).json()
     assert q["total"]["method"] == "parts_history_combined"
     assert {j["job_code"] for j in q["inferred_jobs"]} == {"BATTERY", "STARTER"}
-    assert q["total"]["p50_hours"] >= max(l["p50_hours"] for l in q["labor"])
+    assert q["total"]["p50_hours"] >= max(lab["p50_hours"] for lab in q["labor"])
 
 
 def test_parts_edge_cases(client):
@@ -163,3 +163,93 @@ def test_parts_quote_suggests_description(client):
     assert combined.get("combined") and "BATTER" in combined["description"] and "STARTER" in combined["description"]
     q = client.post("/quotes", json={"make": "JD", "model": "544P", "job_text": "valve lash adjustment"}).json()
     assert q["suggested_descriptions"][0]["segments"] > 10
+
+
+def test_messy_make_model_are_standardised(client, built):
+    con = duckdb.connect(str(built["settings"].db_path), read_only=True)
+    makes = {r[0] for r in con.execute("select distinct make from segments").fetchall()}
+    assert makes == {"JD"}                                    # JDE, DEERE, 'JD #2', 'John Deere' folded in
+    models = {r[0] for r in con.execute("select distinct model from segments").fetchall()}
+    assert "333G" in models and "333 G" not in models
+    q = client.post("/quotes", json={"make": "John Deere", "model": "333 g", "job_codes": ["BATTERY"]}).json()
+    assert q["machine"]["make"] == "JD" and q["machine"]["model_key"] == "333G"
+    assert q["machine"]["make_entered"] == "John Deere"
+    r = client.get("/machines/resolve", params={"make": "deere", "model": "872 gp"}).json()
+    assert r["make"] == "JD" and r["model_key"] == "872GP"
+
+
+def test_shop_and_offsite_hours(client):
+    for body in ({"job_codes": ["BATTERY"]}, {"job_text": "valve lash adjustment"}, {"part_numbers": ["TY25879B"]}):
+        q = client.post("/quotes", json={"make": "JD", "model": "333G", **body}).json()
+        assert set(q["by_location"]) == {"SHOP", "OFFSITE"}, body
+        assert q["by_location"]["SHOP"]["sample_size"] > 0
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["BATTERY"], "location": "Off site"}).json()
+    assert q["total"]["location"] == "OFFSITE"
+    assert q["total"]["p50_hours"] == q["by_location"]["OFFSITE"]["p50_hours"]
+    assert client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["BATTERY"],
+                                        "location": "moon"}).status_code == 422
+
+
+def test_input_limits(client):
+    assert client.post("/quotes", json={"make": "JD", "model": "333G", "job_text": "x" * 301}).status_code == 422
+    assert client.post("/quotes", json={"make": "JD", "model": "333G",
+                                        "part_numbers": [f"P{i}" for i in range(51)]}).status_code == 422
+
+
+def test_ops_endpoints_and_request_id(client):
+    r = client.get("/ready")
+    assert r.status_code == 200 and r.json()["ready"] is True
+    assert client.get("/version").status_code == 200
+    r = client.get("/jobs", headers={"X-Request-ID": "abc123"})
+    assert r.headers["X-Request-ID"] == "abc123"
+
+
+def test_api_keys(built, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from quote_system.api.main import app
+
+    monkeypatch.setenv("QS_API_KEYS", "k1,k2")
+    monkeypatch.setenv("QS_ADMIN_KEY", "adm")
+    try:
+        with TestClient(app) as c:
+            assert c.get("/health").status_code == 200           # open
+            assert c.get("/ready").status_code == 200            # open
+            assert c.get("/jobs").status_code == 401
+            assert c.get("/jobs", headers={"X-API-Key": "nope"}).status_code == 401
+            assert c.get("/jobs", headers={"X-API-Key": "k2"}).status_code == 200
+            assert c.post("/admin/reload", headers={"X-API-Key": "k1"}).status_code == 403
+            assert c.post("/admin/reload", headers={"X-Admin-Key": "adm"}).status_code == 200
+    finally:
+        monkeypatch.delenv("QS_API_KEYS")
+        monkeypatch.delenv("QS_ADMIN_KEY")
+        with TestClient(app):
+            pass  # restore open mode for the other tests
+
+
+def test_bad_export_never_replaces_good_statistics(built, tmp_path):
+    from dataclasses import replace
+
+    import pytest
+
+    from quote_system.pipeline import build_database
+    from quote_system.validate import ValidationError
+
+    s = replace(built["settings"], min_segments=10**9)
+    target = tmp_path / "quote.duckdb"
+    with pytest.raises(ValidationError, match="work-order segments"):
+        build_database(s, target, skip_ingest=True)
+    assert not target.exists()
+    # a collapse versus the previous build is refused too
+    s = replace(built["settings"], max_drop=0.0)
+    import duckdb as _d
+
+    con = _d.connect(str(built["settings"].db_path), read_only=True)
+    prev = int(con.execute("select v from meta where k = 'segments'").fetchone()[0])
+    con.close()
+    from quote_system.validate import validate
+
+    with pytest.raises(ValidationError, match="dropped"):
+        validate(s.work_dir / "workorders.parquet", s.work_dir / "parts.parquet", s, prev * 2)
+    report = (built["settings"].db_path.parent / "review" / "data_quality.md").read_text()
+    assert "Make / model standardisation" in report

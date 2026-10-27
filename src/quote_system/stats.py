@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import duckdb
 
@@ -22,13 +22,19 @@ log = logging.getLogger(__name__)
 # level name -> SQL expression for the grouping key (all levels are additionally grouped by job_key)
 LEVELS = {
     "model": "make || '|' || model",
+    "series": "make || '|' || series",
     "base": "make || '|' || base_model",
     "make_div": "make || '|' || division",
     "division": "division",
     "global": "''",
 }
+# shop vs field work: 'SHOP' / 'OFFSITE' (anything else is left out of the split, but kept in 'ALL')
+LOCATION_SQL = ("case when upper(coalesce(location, '')) like 'SHOP%' then 'SHOP' "
+                "when regexp_matches(upper(coalesce(location, '')), 'OFF|FIELD|SITE') then 'OFFSITE' else null end")
+
 KIT_KEYS = {
     "model": "s.make || '|' || s.model",
+    "series": "s.make || '|' || s.series",
     "base": "s.make || '|' || s.base_model",
     "make_div": "s.make || '|' || s.division",
 }
@@ -44,15 +50,16 @@ def build_stats(con: duckdb.DuckDBPyConnection, settings: Settings, cutoff: str 
 
     con.execute(f"""
         create or replace table scoped as
-        select * from segments where status in ({statuses}) and invoice_date is not null {date_filter};
+        select * from segments where status in ({statuses}) and invoice_date is not null
+          and invoice_date <= current_date + interval 1 day {date_filter};
         create or replace table eligible as select * from scoped where n_jobs > 0;
     """)
     # hours sample: positive, sane hours, robust outlier removal on log scale per job_key
     con.execute(f"""
         create or replace table hours_sample as
         with s as (
-          select service_order_id, job_key, n_jobs, make, model, base_model, division, actual_hours, eq_hours,
-                 invoice_date, ln(actual_hours) as lh
+          select service_order_id, job_key, n_jobs, make, model, series, base_model, division, actual_hours, eq_hours,
+                 invoice_date, ln(actual_hours) as lh, {LOCATION_SQL} as location
           from eligible where actual_hours > 0 and actual_hours <= {settings.max_hours}
         ),
         m as (select job_key, median(lh) as med from s group by 1),
@@ -64,23 +71,25 @@ def build_stats(con: duckdb.DuckDBPyConnection, settings: Settings, cutoff: str 
                 f"where abs(robust_z) <= {settings.outlier_mad_z}")
 
     unions = " union all ".join(f"""
-        select '{lvl}' as level, job_key, {expr} as key, count(*) as n,
+        select '{lvl}' as level, job_key, {expr} as key, coalesce(location, 'ALL') as location, count(*) as n,
                quantile_cont(actual_hours, 0.25) as p25, median(actual_hours) as p50,
                quantile_cont(actual_hours, 0.80) as p80, quantile_cont(actual_hours, 0.90) as p90,
                avg(actual_hours) as mean,
                count(*) filter (where eq_hours > 0) as eq_n,
                median(eq_hours) filter (where eq_hours > 0) as eq_p50,
                max(invoice_date) as last_date
-        from hours_clean group by job_key, {expr}""" for lvl, expr in LEVELS.items())
+        from hours_clean group by grouping sets ((job_key, {expr}), (job_key, {expr}, location))
+        having location is not null or grouping(location) = 1""" for lvl, expr in LEVELS.items())
     con.execute(f"create or replace table labor_stats as {unions}")
 
     con.execute("""
         create or replace table models as
-        with d as (select make, model, base_model, division, count(*) as n from segments
+        with d as (select make, model, series, base_model, division, count(*) as n from segments
                    where model <> 'UNKNOWN' group by all)
-        select make, model, min(base_model) as base_model,
-               first(division order by n desc, division) as division, sum(n) as n_segments
-        from d group by make, model
+        select d.make, d.model, min(d.series) as series, min(d.base_model) as base_model,
+               first(d.division order by d.n desc, d.division) as division, sum(d.n) as n_segments,
+               any_value(md.display_model) as display_model
+        from d left join model_display md using (make, model) group by d.make, d.model
     """)
 
     # parts kits from single-job segments
@@ -90,7 +99,7 @@ def build_stats(con: duckdb.DuckDBPyConnection, settings: Settings, cutoff: str 
         from kit_segs s left join kit_parts p using (service_order_id)""" for lvl in KIT_KEYS)
     con.execute("""
         create or replace temp table kit_segs as
-        select service_order_id, job_key, make, model, base_model, division from eligible where n_jobs = 1;
+        select service_order_id, job_key, make, model, series, base_model, division from eligible where n_jobs = 1;
         create or replace temp table kit_parts as
         select service_order_id, part_number, sum(qty) as qty from parts
         where service_order_id in (select service_order_id from kit_segs) and coalesce(qty, 0) > 0
@@ -123,7 +132,7 @@ def build_stats(con: duckdb.DuckDBPyConnection, settings: Settings, cutoff: str 
     # combo overlap: actual hours of multi-component segments vs the sum of their single-job global medians
     overlap = con.execute("""
         with comp as (select list(job_code) as codes from job_catalog where category = 'component'),
-        single as (select job_key, p50 from labor_stats where level = 'global' and job_key not like '%+%'),
+        single as (select job_key, p50 from labor_stats where level = 'global' and location = 'ALL' and job_key not like '%+%'),
         multi as (
           select h.service_order_id, h.actual_hours, unnest(string_split(h.job_key, '+')) as j
           from hours_clean h, comp
@@ -144,7 +153,7 @@ def build_stats(con: duckdb.DuckDBPyConnection, settings: Settings, cutoff: str 
                (select min(invoice_date) from eligible), (select max(invoice_date) from eligible)
     """).fetchone()
     meta = {
-        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "built_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "cutoff": cutoff,
         "segments": info[0], "eligible_segments": info[1], "hours_sample": info[2], "single_job_sample": info[3],
         "data_from": str(info[4]), "data_to": str(info[5]),

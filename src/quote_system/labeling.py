@@ -16,8 +16,7 @@ import duckdb
 import pandas as pd
 
 from .config import Settings
-from .rules import (MODIFIER_JOBS, PM_INTERVAL_RE, PM_INTERVALS, load_component_rules, load_jobs,
-                    load_overrides, load_symptoms)
+from .rules import MODIFIER_JOBS, PM_INTERVAL_RE, PM_INTERVALS, load_component_rules, load_jobs, load_overrides, load_symptoms
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ def classify_parts(con: duckdb.DuckDBPyConnection, settings: Settings) -> pd.Dat
     is_core = pr["part_number"].str.startswith("CR") & pr["part_number"].str[2:].isin(known)
 
     comps, roles, sources, shares = [], [], [], []
-    for row, core in zip(pr.itertuples(index=False), is_core):
+    for row, core in zip(pr.itertuples(index=False), is_core, strict=False):
         role, comp, source, share = row.role, "", "rule" if pd.notna(row.rule_idx) else "none", None
         n = row.n_segments
         if core:
@@ -102,7 +101,10 @@ def classify_parts(con: duckdb.DuckDBPyConnection, settings: Settings) -> pd.Dat
             best_share, best = scored[-1]
             if best_share >= settings.discover_min_share:
                 role, comp, source, share = "primary", best, "text_vote", best_share
-        comps.append(comp); roles.append(role); sources.append(source); shares.append(share)
+        comps.append(comp)
+        roles.append(role)
+        sources.append(source)
+        shares.append(share)
     pr["component"], pr["role"], pr["source"], pr["evidence_share"] = comps, roles, sources, shares
 
     for o in load_overrides(cfg):
@@ -117,7 +119,7 @@ def classify_parts(con: duckdb.DuckDBPyConnection, settings: Settings) -> pd.Dat
     return out
 
 
-def label_segments(con: duckdb.DuckDBPyConnection, settings: Settings) -> None:
+def label_segments(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict:
     cfg = settings.config_dir
     jobs = load_jobs(cfg)
     comp_codes = [j.job_code for j in jobs if j.category == "component"]
@@ -144,9 +146,7 @@ def label_segments(con: duckdb.DuckDBPyConnection, settings: Settings) -> None:
     con.execute(f"""
         create or replace table segments as
         with base as (
-          select w.*, {_text_sql('w.description')} as t,
-                 case when regexp_matches(regexp_replace(w.model, '[A-Z]+$', ''), '[0-9]') then regexp_replace(w.model, '[A-Z]+$', '')
-                      else w.model end as base_model
+          select w.*, {_text_sql('w.description')} as t
           from workorders w
         ),
         part_jobs as (
@@ -193,3 +193,4 @@ def label_segments(con: duckdb.DuckDBPyConnection, settings: Settings) -> None:
         from segments
     """).df().iloc[0].to_dict()
     log.info("labelling: %s", summary)
+    return {k: int(v) for k, v in summary.items()}

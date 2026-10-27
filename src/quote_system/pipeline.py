@@ -18,9 +18,12 @@ import duckdb
 from .config import Settings, get_settings
 from .ingest import ingest
 from .labeling import classify_parts, label_segments
+from .logging_setup import setup_logging
+from .normalize import standardize
 from .rules import load_jobs, pm_job_codes
-from .stats import build_stats
+from .stats import LOCATION_SQL, build_stats
 from .textsearch import build_index, index_dir_for
+from .validate import ValidationError, input_manifest, previous_segments, validate, write_quality_report
 
 log = logging.getLogger("quote_system.pipeline")
 
@@ -37,7 +40,8 @@ def _load_job_catalog(con: duckdb.DuckDBPyConnection, settings: Settings) -> Non
     con.executemany("insert into job_catalog values (?, ?, ?, ?)", rows)
 
 
-def build_database(settings: Settings, db_path: Path, cutoff: str | None = None, skip_ingest: bool = False) -> dict:
+def build_database(settings: Settings, db_path: Path, cutoff: str | None = None, skip_ingest: bool = False,
+                   force: bool = False) -> dict:
     t0 = time.time()
     settings.ensure_dirs()
     wo = settings.work_dir / "workorders.parquet"
@@ -45,6 +49,9 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
     if not skip_ingest or not (wo.exists() and parts.exists()):
         ingest(settings)
     log.info("ingest done in %.1fs", time.time() - t0)
+    # a bad export must not replace good statistics: this raises before anything is written
+    validation = validate(wo, parts, settings, previous_segments(db_path), force=force)
+    log.info("validation: %s", {k: validation[k] for k in ("segments", "part_lines", "part_match_rate")})
 
     tmp = db_path.with_suffix(".building.duckdb")
     for p in (tmp, Path(str(tmp) + ".wal")):
@@ -57,19 +64,30 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
     con.execute(f"create table workorders as select * from '{wo}'")
     con.execute(f"create table parts as select * from '{parts}'")
     _load_job_catalog(con, settings)
+    norm_stats = standardize(con, settings)
+    log.info("make/model standardisation: %s", norm_stats)
 
     classify_parts(con, settings)
     log.info("taxonomy done in %.1fs", time.time() - t0)
-    label_segments(con, settings)
+    labelling = label_segments(con, settings)
     log.info("labelling done in %.1fs", time.time() - t0)
     meta = build_stats(con, settings, cutoff=cutoff)
+    meta["standardisation"] = norm_stats
+    meta["validation"] = validation
+    manifest = {"built_at": meta["built_at"], "version": settings.version, "cutoff": cutoff,
+                "inputs": input_manifest(settings.raw_dir) if not cutoff else [], "max_hours": settings.max_hours,
+                "standardisation": norm_stats, "labelling": labelling, "validation": validation}
+    for k, v in (("standardisation", norm_stats), ("validation", validation), ("labelling", labelling),
+                 ("manifest", manifest)):
+        con.execute("insert into meta values (?, ?)", [k, json.dumps(v, default=str)])
     log.info("stats done in %.1fs", time.time() - t0)
 
     # context search: every segment with usable hours, labelled or not ('VALVE LASH ADJUSTMENT' has no job code)
     con.execute(f"""
         create or replace table text_pool as
         select service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
-               make, model, base_model, division, actual_hours, eq_hours, job_key
+               make, model, base_model, division, actual_hours, eq_hours, job_key, series, {LOCATION_SQL} as location,
+               model_raw
         from scoped where actual_hours > 0 and actual_hours <= {settings.max_hours} and norm_text <> ''
     """)
     con.execute("create index if not exists ix_pool_text on text_pool (norm_text)")
@@ -106,6 +124,12 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
     final_idx = index_dir_for(db_path)
     shutil.rmtree(final_idx, ignore_errors=True)
     shutil.move(str(idx_tmp), str(final_idx))
+    if not cutoff:  # the live build documents itself; backtest builds do not overwrite the review files
+        review = db_path.parent / "review"
+        review.mkdir(parents=True, exist_ok=True)
+        manifest["seconds"] = round(time.time() - t0, 1)
+        (review / "build_manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+        write_quality_report(review / "data_quality.md", validation, norm_stats, labelling, manifest)
     log.info("wrote %s in %.1fs", db_path, time.time() - t0)
     return meta
 
@@ -115,14 +139,22 @@ def main() -> None:
     ap.add_argument("--skip-ingest", action="store_true", help="reuse data/work/*.parquet from a previous run")
     ap.add_argument("--cutoff", help="only learn from segments invoiced before YYYY-MM-DD")
     ap.add_argument("--db", help="output database path (default data/quote.duckdb)")
+    ap.add_argument("--force", action="store_true", help="build even if data validation finds problems")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     s = get_settings()
-    meta = build_database(s, Path(args.db) if args.db else s.db_path, cutoff=args.cutoff, skip_ingest=args.skip_ingest)
+    setup_logging(s.log_json, s.log_level)
+    try:
+        meta = build_database(s, Path(args.db) if args.db else s.db_path, cutoff=args.cutoff,
+                              skip_ingest=args.skip_ingest, force=args.force)
+    except ValidationError as e:
+        log.error(str(e))
+        print(f"\nBuild stopped - the previous database (if any) is unchanged.\n{e}\n")
+        raise SystemExit(2) from None
     print("\nBuild complete:")
     for k in ("segments", "eligible_segments", "hours_sample", "single_job_sample", "data_from", "data_to",
               "combo_overlap_factor"):
         print(f"  {k:22s} {meta[k]}")
+    print(f"  {'review files':22s} {(Path(args.db) if args.db else s.db_path).parent / 'review'}")
 
 
 if __name__ == "__main__":

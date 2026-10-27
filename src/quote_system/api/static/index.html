@@ -12,7 +12,7 @@ header{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justif
 h1{font-size:18px;margin:0;font-weight:600}.sub{color:var(--muted);font-size:13px}
 main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
-form{display:grid;grid-template-columns:100px 140px 1fr 150px auto auto;gap:10px;align-items:end}
+form{display:grid;grid-template-columns:130px 130px 1fr 150px 130px auto auto;gap:10px;align-items:end}
 @media (max-width:760px){form{grid-template-columns:1fr 1fr}form .wide{grid-column:1/-1}}
 label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
 input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
@@ -41,6 +41,8 @@ h2{font-size:15px;margin:0 0 10px}.muted{color:var(--muted)}.small{font-size:12p
       <div><label for="make">Make</label><input id="make" list="makes" value="JD" required></div>
       <div><label for="model">Model</label><input id="model" list="models" placeholder="333G" required></div>
       <div class="wide"><label for="job">Job (free text or pick)</label><input id="job" list="jobs" placeholder="valve lash adjustment, replace battery, cab door hinge broken, not starting…"></div>
+      <div><label for="loc">Location</label><select id="loc">
+        <option value="">Shop + off-site</option><option value="shop">Shop</option><option value="offsite">Off site</option></select></div>
       <div><label for="match">Understand job by</label><select id="match">
         <option value="auto">Auto (context first)</option><option value="context">Context (past work)</option><option value="job">Job list only</option></select></div>
       <label class="chk"><input type="checkbox" id="parts" checked> include parts</label>
@@ -57,7 +59,31 @@ h2{font-size:15px;margin:0 0 10px}.muted{color:var(--muted)}.small{font-size:12p
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const h = v => v == null ? '–' : Number(v).toFixed(1);
-async function api(path, opts){const r = await fetch(path, opts); const body = await r.json().catch(()=>({})); return {ok:r.ok, status:r.status, body};}
+function getKey(){ try { return localStorage.getItem('qs_api_key') || ''; } catch (e) { return window._qsKey || ''; } }
+function setKey(k){ try { localStorage.setItem('qs_api_key', k); } catch (e) { window._qsKey = k; } }
+async function api(path, opts = {}){
+  const headers = {...(opts.headers || {})};
+  const key = getKey(); if (key) headers['X-API-Key'] = key;
+  const r = await fetch(path, {...opts, headers});
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401) askKey();
+  return {ok: r.ok, status: r.status, body};
+}
+function askKey(){
+  if ($('#keyCard')) return;
+  const d = document.createElement('div');
+  d.className = 'card'; d.id = 'keyCard';
+  d.innerHTML = `<h2>API key needed</h2><p class="small muted">This server requires an API key. Ask the administrator for one.</p>
+    <div style="display:flex;gap:8px;max-width:460px"><input id="keyIn" type="password" placeholder="API key" autocomplete="off">
+    <button id="keySave">Save</button></div><p id="keyMsg" class="small err"></p>`;
+  document.querySelector('main').prepend(d);
+  $('#keySave').onclick = () => {
+    const v = $('#keyIn').value.trim();
+    if (!v) { $('#keyMsg').textContent = 'Enter the key first'; return; }
+    setKey(v); d.remove(); init();
+  };
+  $('#keyIn').addEventListener('input', () => { $('#keyMsg').textContent = ''; });
+}
 
 async function init(){
   const hl = await api('/health');
@@ -66,9 +92,10 @@ async function init(){
     : 'No data loaded – run make pipeline';
   if (hl.body.status !== 'ok') return;
   const mk = await api('/makes');
+  if (!mk.ok) return;  // e.g. API key needed: askKey() is showing, init() runs again after the key is saved
   $('#makes').innerHTML = mk.body.slice(0,100).map(m => `<option value="${esc(m.make)}">`).join('');
   const jb = await api('/jobs?limit=100');
-  $('#jobs').innerHTML = jb.body.map(j => `<option value="${esc(j.display_name)}">`).join('');
+  if (jb.ok) $('#jobs').innerHTML = jb.body.map(j => `<option value="${esc(j.display_name)}">`).join('');
 }
 let t;
 $('#model').addEventListener('input', () => { clearTimeout(t); t = setTimeout(async () => {
@@ -93,6 +120,7 @@ async function quote(jobSpec){
   $('#msg').textContent = ''; $('#out').innerHTML = '<p class="muted">Quoting…</p>';
   const body = {make: $('#make').value, model: $('#model').value, include_parts: $('#parts').checked,
                 match: $('#match').value, ...jobSpec};
+  if ($('#loc').value) body.location = $('#loc').value;
   // the datalist inserts display names: map them back to codes
   if (body.job_text && body.match !== 'context' && !body.part_numbers) {
     const jb = await api('/jobs?limit=100');
@@ -132,13 +160,18 @@ function render(q){
   const tot = q.total || {};
   const m = q.machine;
   let html = (q.warnings||[]).map(w => `<div class="warn">${esc(w)}</div>`).join('');
-  html += `<div class="card"><div class="muted small">${esc(m.make)} ${esc(m.model)} · ${esc(m.division || '')} · quote ${esc(q.quote_id)}</div>
+  const entered = (m.make_entered || m.model_entered) ? ` <span title="how what you typed was read">(entered “${esc(m.make_entered || m.make)} ${esc(m.model_entered || m.model)}”)</span>` : '';
+  const locLabel = tot.location === 'SHOP' ? ' · shop' : tot.location === 'OFFSITE' ? ' · off site' : '';
+  const byLoc = q.by_location || {};
+  const locRows = ['SHOP', 'OFFSITE'].filter(k => byLoc[k]).map(k => { const b = byLoc[k]; return `<tr><td>${esc(b.label)}</td><td class="num">${h(b.p50_hours)}</td><td class="num">${h(b.p80_hours)}</td><td class="num">${h(b.p25_hours)}–${h(b.p90_hours)}</td><td class="small">${esc(b.level_used)} · n=${b.sample_size}</td><td><span class="pill ${b.confidence==='low'?'low':''}">${esc(b.confidence)}</span></td></tr>`; }).join('');
+  html += `<div class="card"><div class="muted small">${esc(m.make)} ${esc(m.model)}${entered} · series ${esc(m.series || '')} · ${esc(m.division || '')}${locLabel} · quote ${esc(q.quote_id)}</div>
     <h2 style="margin-top:4px">${q.labor.map(l => esc(l.display_name)).join(' + ')}</h2>
     <div class="big"><div><div class="n">${h(tot.p50_hours)} h</div><div class="l">typical (P50)</div></div>
     <div><div class="n">${h(tot.p80_hours)} h</div><div class="l">safe quote (P80)</div></div>
     <div><div class="n" style="font-size:20px">${h(tot.p25_hours)}–${h(tot.p90_hours)} h</div><div class="l">P25–P90 range</div></div></div>
     <p class="small muted">Method: ${q.mode === 'parts_history' ? `parts match – ${q.matched_segments.toLocaleString()} past segments that used these parts${tot.overlap_basis ? ` (repairs combined using ${esc(tot.overlap_basis)}, × ${tot.overlap_factor})` : ''}` : q.mode === 'similar_history' ? `context match – ${q.matched_segments.toLocaleString()} past segments with the same meaning` : esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor && !tot.overlap_basis ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p>
     ${q.job_list_check ? `<p class="small muted">Job list check (${esc(q.job_list_check.display)}): P50 ${h(q.job_list_check.total.p50_hours)} h / P80 ${h(q.job_list_check.total.p80_hours)} h.</p>` : ''}
+    ${locRows ? `<div class="scroll" style="margin-top:10px"><table><tr><th>Shop vs off-site</th><th class="num">Typical (P50)</th><th class="num">Safe (P80)</th><th class="num">P25–P90</th><th>Based on</th><th>Confidence</th></tr>${locRows}</table></div>` : ''}
     ${q.context_check ? `<p class="small muted">Context check: ${q.context_check.matched_segments.toLocaleString()} past segments worded like this took P50 ${h(q.context_check.total.p50_hours)} h / P80 ${h(q.context_check.total.p80_hours)} h (${esc(q.context_check.level_used)} level, n=${q.context_check.sample_size}).</p>` : ''}</div>`;
   if (q.suggested_descriptions && q.suggested_descriptions.length){
     const [top, ...rest] = q.suggested_descriptions;
@@ -194,7 +227,7 @@ function render(q){
   if (q.similar_work_orders.length){
     html += `<div class="card"><h2>Recent similar work orders</h2><div class="scroll"><table><tr><th>WO-Seg</th><th>Date</th><th>Branch</th><th>Description</th><th class="num">Actual</th><th class="num">EQ</th></tr>` +
       q.similar_work_orders.map(w => `<tr><td>${w.wo_number}-${w.segment}</td><td>${esc(w.invoice_date)}</td><td>${esc(w.branch)}</td>
-      <td>${esc(w.description)} <span class="muted small">${esc(w.model)}${w.match_score != null ? ' · ' + Math.round(w.match_score*100) + '% match' : ''}</span></td><td class="num">${h(w.actual_hours)}</td><td class="num">${h(w.eq_hours)}</td></tr>`).join('') + '</table></div></div>';
+      <td>${esc(w.description)} <span class="muted small">${esc(w.model)}${w.location ? ' · ' + esc(w.location) : ''}${w.match_score != null ? ' · ' + Math.round(w.match_score*100) + '% match' : ''}</span></td><td class="num">${h(w.actual_hours)}</td><td class="num">${h(w.eq_hours)}</td></tr>`).join('') + '</table></div></div>';
   }
   html += `<div class="card"><h2>Record actual hours</h2><div style="display:flex;gap:8px;max-width:420px">
     <input id="act" type="number" min="0" step="0.25" placeholder="actual hours"><button class="ghost" id="saveAct">Save</button></div><p id="actMsg" class="small muted"></p></div>`;

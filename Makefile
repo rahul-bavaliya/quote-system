@@ -1,4 +1,4 @@
-.PHONY: help install deps pipeline run dev test backtest sample demo clean check-data
+.PHONY: help install deps lint docker-build docker-pipeline docker-up pipeline run dev test backtest sample demo clean check-data
 
 PY ?= python
 PORT ?= 8000
@@ -10,6 +10,8 @@ help:
 	@echo "make test       run the test-suite (synthetic data, no company data needed)"
 	@echo "make backtest   train on data before 2026-01-01, test on later jobs"
 	@echo "make demo       build from synthetic sample data and start the API"
+	@echo "make lint       ruff checks"
+	@echo "make docker-build / docker-pipeline / docker-up   production container (see README)"
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -47,3 +49,15 @@ demo: sample
 
 clean:
 	rm -rf data/work data/work-sample data/*.duckdb data/*.wal data/backtest_report.md .pytest_cache
+
+lint: deps
+	$(PY) -m ruff check src tests scripts
+
+docker-build:
+	docker compose build
+
+docker-pipeline:
+	docker compose run --rm pipeline
+
+docker-up:
+	docker compose up -d api

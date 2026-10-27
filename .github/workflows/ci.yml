@@ -1,11 +1,45 @@
-name: tests
+name: ci
 on: [push, pull_request]
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
-      - run: pytest -q
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.lock ruff && pip install --no-deps -e .
+      - name: lint
+        run: ruff check src tests scripts
+      - name: tests
+        run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build --build-arg QS_VERSION=${GITHUB_SHA::7} -t quote-system:ci .
+      - name: smoke test (pipeline on synthetic data, then API with auth)
+        run: |
+          mkdir -p smoke && chmod 777 smoke
+          docker run --rm -v "$PWD/smoke:/app/data" quote-system:ci python -m quote_system.sample_data /app/data/raw
+          docker run --rm -v "$PWD/smoke:/app/data" quote-system:ci python -m quote_system.pipeline
+          docker run -d --name qs -p 8000:8000 -v "$PWD/smoke:/app/data" \
+            -e QS_API_KEYS=ci-key -e QS_ADMIN_KEY=ci-admin quote-system:ci
+          for i in $(seq 1 60); do curl -sf localhost:8000/ready && break; sleep 2; done
+          curl -sf localhost:8000/ready
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/jobs)" = "401"
+          curl -sf -X POST localhost:8000/quotes -H 'X-API-Key: ci-key' -H 'content-type: application/json' \
+            -d '{"make":"John Deere","model":"333 G","job_text":"replace battery"}' | python3 -c "
+          import json,sys; q=json.load(sys.stdin)
+          assert q['machine']['make']=='JD' and q['total']['p50_hours']>0 and set(q['by_location'])=={'SHOP','OFFSITE'}, q
+          print('quote ok', q['total'])"
+          curl -sf -X POST localhost:8000/admin/reload -H 'X-Admin-Key: ci-admin' >/dev/null
+          docker inspect --format '{{.Config.User}}' quote-system:ci | grep -q app
+      - name: logs on failure
+        if: failure()
+        run: docker logs qs || true

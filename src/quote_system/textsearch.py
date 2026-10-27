@@ -95,7 +95,7 @@ def tokens(text: str) -> list[str]:
 def analyze(text: str) -> list[str]:
     """Analyzer for TfidfVectorizer: tokens + adjacent pairs (module level so it can be pickled)."""
     tk = tokens(text)
-    return tk + [f"{a} {b}" for a, b in zip(tk, tk[1:])]
+    return tk + [f"{a} {b}" for a, b in zip(tk, tk[1:], strict=False)]
 
 
 W_TFIDF, W_LSA = 0.6, 0.4
@@ -144,7 +144,7 @@ class TextIndex:
         norm = np.linalg.norm(qz)
         s_l = np.asarray(self.Z[idx] @ (qz / norm)) if norm > 0 else np.zeros_like(s_t)
         sc = W_TFIDF * s_t + W_LSA * np.clip(s_l, 0, 1)
-        return {self.texts[i]: float(v) for i, v in zip(idx, sc)}
+        return {self.texts[i]: float(v) for i, v in zip(idx, sc, strict=False)}
 
     def search(self, query: str, limit: int = 300, min_score: float = 0.55, rel: float = 0.75) -> list[tuple[str, float, int]]:
         """Descriptions whose meaning matches the query: (text, score 0-1, segments)."""
