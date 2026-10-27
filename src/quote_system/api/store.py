@@ -28,7 +28,9 @@ class QuoteStore:
             self.db.execute("insert into quotes (id, created_at, make, model, job_key, p50_hours, p80_hours, request, response) "
                             "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (qid, datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                             response["machine"]["make"], response["machine"]["model"], "+".join(sorted(response["jobs"])) or ("SIMILAR:" + (response.get("query") or "")),
+                             response["machine"]["make"], response["machine"]["model"], "+".join(sorted(response["jobs"])) or (
+                                 "PARTS:" + ",".join(k["part_number"] for k in response["parts_query"])
+                                 if response.get("parts_query") else "SIMILAR:" + (response.get("query") or "")),
                              total.get("p50_hours"), total.get("p80_hours"), json.dumps(request), json.dumps(response)))
             self.db.commit()
         return qid

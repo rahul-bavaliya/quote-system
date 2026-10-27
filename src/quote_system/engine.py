@@ -349,6 +349,9 @@ class QuoteEngine:
         }
 
     # ------------------------------------------------------------------ context (similar-history) quotes
+    POOL_COLS = """service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
+                   make, model, base_model, division, actual_hours, eq_hours"""
+
     def similar_quote(self, text: str, m: Machine, include_parts: bool = True) -> dict | None:
         """Quote from past segments whose description *means* the same thing as ``text``.
 
@@ -366,20 +369,175 @@ class QuoteEngine:
                 break
         matches = chosen
         score_of = {t: sc for t, sc, _ in matches}
-        c = self.cursor()
-        rows = c.execute("""
-            select service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
-                   make, model, base_model, division, actual_hours, eq_hours
-            from text_pool where norm_text in (select unnest(?))
-        """, [list(score_of)]).fetchall()
+        rows = self.cursor().execute(f"select {self.POOL_COLS} from text_pool where norm_text in (select unnest(?))",
+                                     [list(score_of)]).fetchall()
         if not rows:
             return None
+        weights = {r[0]: score_of.get(r[6], 0.0) for r in rows}
+        out = self._pool_quote(rows, weights, m, include_parts, text.strip(), best)
+        if out is None:
+            return None
+        model_counts: dict[str, int] = {}
+        for r in out.pop("_model_rows"):
+            model_counts[r[6]] = model_counts.get(r[6], 0) + 1
+        out["matched_descriptions"] = sorted(
+            ({"description": t, "score": sc, "segments": n, "on_this_model": model_counts.get(t, 0)} for t, sc, n in matches),
+            key=lambda d: (-d["score"], -d["on_this_model"], -d["segments"]))[:15]
+        if best < 0.7:
+            out["warnings"].insert(0, "Closest past descriptions are only a loose match - check the matched descriptions.")
+        out.update({"mode": "similar_history", "query": text})
+        out["total"]["method"] = "similar_history"
+        return out
+
+    # ------------------------------------------------------------------ parts-based quotes
+    def resolve_parts(self, part_numbers: list[str]) -> tuple[list[dict], list[str]]:
+        """Map user part numbers to known ones (case/space/dash-insensitive). Returns (known, unknown)."""
+        c = self.cursor()
+        known, unknown = [], []
+        for raw in part_numbers:
+            pn = re.sub(r"\s+", "", str(raw).upper())
+            if not pn:
+                continue
+            key = re.sub(r"[^A-Z0-9]", "", pn)
+            row = c.execute("""select i.part_number, i.idf, i.segs, t.description, t.role, t.component
+                               from part_idf i left join part_taxonomy t using (part_number)
+                               where i.part_number = ? or i.pn_key = ? order by (i.part_number = ?) desc, i.segs desc limit 1""",
+                            [pn, key, pn]).fetchone()
+            if row:
+                known.append({"input": raw, "part_number": row[0], "idf": row[1], "history_segments": row[2],
+                              "description": row[3], "role": row[4], "component": row[5] or None})
+            else:
+                unknown.append(raw)
+        return known, unknown
+
+    def parts_quote(self, part_numbers: list[str], m: Machine, include_parts: bool = True,
+                    text: str | None = None) -> dict | None:
+        """Labour from past segments that used the same parts (idf-weighted cosine: a starter
+        identifies a job, an o-ring barely does). Optional ``text`` re-ranks by description.
+
+        Parts for two or more different repairs (battery + starter) are quoted per repair and
+        combined like combined jobs, so one rare part cannot hide the other repair."""
+        known, unknown = self.resolve_parts(part_numbers)
+        if not known:
+            return None
+        seen = {}
+        for k_ in known:
+            seen.setdefault(k_["part_number"], k_)
+        known = list(seen.values())
+        comp_of = {k_["part_number"]: k_["component"] for k_ in known if k_["role"] == "primary" and k_["component"]}
+        for k_ in known:  # core returns belong to the repair of their part (CRSE502823 -> SE502823)
+            if k_["role"] == "core" and k_["part_number"].startswith("CR"):
+                base = self.resolve_parts([k_["part_number"][2:]])[0]
+                if base and base[0]["component"]:
+                    comp_of[k_["part_number"]] = base[0]["component"]
+        comps = sorted(set(comp_of.values()))
+        if len(comps) < 2:
+            return self._parts_pool(known, unknown, m, include_parts, text)
+        others = [k_ for k_ in known if k_["part_number"] not in comp_of]
+        subs = []
+        for c in comps:
+            grp = [k_ for k_ in known if comp_of.get(k_["part_number"]) == c] + others
+            sub = self._parts_pool(grp, [], m, include_parts, text)
+            if sub:
+                subs.append((c, sub))
+        if not subs:
+            return None
+        if len(subs) == 1:
+            return subs[0][1]
+        singles = [sub["total"] for _, sub in subs]
+        combo_key = "+".join(c for c, _ in subs)
+        g = self.stats.get((combo_key, "global", ""))
+        factor, how = self.overlap, "overlap factor"
+        if g and g["n"] >= self.settings.combo_min_n:
+            single_g = [self.stats.get((c, "global", "")) for c, _ in subs]
+            if all(single_g):
+                factor, how = g["p50"] / sum(x["p50"] for x in single_g), f"{g['n']} past {combo_key} jobs"
+        total = {p: round(max(max(t[p] for t in singles), sum(t[p] for t in singles) * factor), 2)
+                 for p in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")}
+        total.update({"method": "parts_history_combined", "overlap_factor": round(factor, 3), "overlap_basis": how})
+        first = subs[0][1]
+        warnings = [f"Parts cover {len(subs)} repairs ({', '.join(c for c, _ in subs)}): quoted separately and combined."]
+        if unknown:
+            warnings.append(f"Not found in parts history (ignored): {', '.join(map(str, unknown))}")
+        return {
+            "mode": "parts_history", "query": text or "", "machine": first["machine"], "jobs": [],
+            "labor": [l for _, sub in subs for l in sub["labor"]], "total": total,
+            "parts": [p for _, sub in subs for p in sub["parts"]], "parts_included": include_parts,
+            "matched_segments": sum(sub["matched_segments"] for _, sub in subs),
+            "matched_descriptions": [d for _, sub in subs for d in sub["matched_descriptions"][:8]],
+            "similar_work_orders": [w for _, sub in subs for w in sub["similar_work_orders"][:4]],
+            "parts_query": known, "unknown_parts": unknown,
+            "inferred_jobs": [{"job_code": c, "display_name": self.catalog.get(c, {}).get("display_name", c)} for c, _ in subs],
+            "warnings": warnings + [w for _, sub in subs for w in sub["warnings"]],
+        }
+
+    def _parts_pool(self, known: list[dict], unknown: list, m: Machine, include_parts: bool,
+                    text: str | None) -> dict | None:
+        qnorm = float(np.sqrt(sum(k_["idf"] ** 2 for k_ in known)))
+        rows = self.cursor().execute(f"""
+            with q as (select unnest(?) as part_number, unnest(?) as idf),
+            hit as (select service_order_id, sum(q.idf * q.idf) as dot
+                    from (select distinct service_order_id, part_number from parts
+                          where part_number in (select part_number from q)) p
+                    join q using (part_number) group by 1)
+            select {", ".join("t." + c.strip() for c in self.POOL_COLS.split(","))}, hit.dot / (? * n.norm) as score
+            from hit join seg_part_norm n using (service_order_id) join text_pool t using (service_order_id)
+            order by score desc limit 50000
+        """, [[k_["part_number"] for k_ in known], [k_["idf"] for k_ in known], qnorm]).fetchall()
+        if not rows:
+            return None
+        scores = {r[0]: float(r[13]) for r in rows}
+        if text and self.text_index is not None:
+            ts = self.text_index.score_texts(text, list({r[6] for r in rows}))
+            scores = {r[0]: scores[r[0]] * (0.5 + 0.5 * ts.get(r[6], 0.0)) for r in rows}
+        ranked = sorted(rows, key=lambda r: -scores[r[0]])
+        best = scores[ranked[0][0]]
+        for frac in (0.9, 0.8, 0.7, 0.6, 0.5):
+            chosen = [r for r in ranked if scores[r[0]] >= max(frac * best, 0.2)]
+            if len(chosen) >= self.settings.similar_min_pool:
+                break
+        rows = [r[:13] for r in chosen]
+        if not rows:
+            return None
+        title = ", ".join(f"{k_['part_number']}" + (f" ({k_['description']})" if k_["description"] else "") for k_ in known)
+        main = sorted({k_["component"] for k_ in known if k_["role"] == "primary" and k_["component"]})
+        title = (" + ".join(self.catalog.get(c, {}).get("display_name", c) for c in main) + f" (parts {title})"
+                 if main else f"Parts {title}")
+        out = self._pool_quote(rows, scores, m, include_parts, title, best)
+        if out is None:
+            return None
+        model_rows = out.pop("_model_rows")
+        # what were these parts used for? most common descriptions in the matched history
+        desc_n: dict[str, int] = {}
+        for r in rows:
+            desc_n[r[6]] = desc_n.get(r[6], 0) + 1
+        on_model: dict[str, int] = {}
+        for r in model_rows:
+            on_model[r[6]] = on_model.get(r[6], 0) + 1
+        out["matched_descriptions"] = [
+            {"description": d, "score": round(n / len(rows), 3), "segments": n, "on_this_model": on_model.get(d, 0)}
+            for d, n in sorted(desc_n.items(), key=lambda x: (-on_model.get(x[0], 0), -x[1]))[:15]]
+        jobs = sorted({k_["component"] for k_ in known if k_["role"] == "primary" and k_["component"]})
+        out.update({"mode": "parts_history", "query": text or "", "parts_query": known, "unknown_parts": unknown,
+                    "inferred_jobs": [{"job_code": j, "display_name": self.catalog.get(j, {}).get("display_name", j)}
+                                      for j in jobs]})
+        out["total"]["method"] = "parts_history"
+        if unknown:
+            out["warnings"].insert(0, f"Not found in parts history (ignored): {', '.join(map(str, unknown))}")
+        if all(k_["role"] in ("consumable", "fee", "hardware", "core") for k_ in known):
+            out["warnings"].insert(0, "Only consumables/hardware given - they are used on many different jobs, "
+                                      "so add the main part or a job description for a tighter quote.")
+        return out
+
+    # ------------------------------------------------------------------ shared: quote from a pool of past segments
+    def _pool_quote(self, rows: list, weights: dict, m: Machine, include_parts: bool, title: str,
+                    best: float) -> dict | None:
         hours = np.array([r[11] for r in rows], dtype=float)
         lh = np.log(hours)
         med = np.median(lh)
         mad = max(1.4826 * np.median(np.abs(lh - med)), 0.1)
         keep = np.abs(lh - med) / mad <= self.settings.outlier_mad_z
-        rows = [r for r, k in zip(rows, keep) if k]
+        rows = [r for r, k_ in zip(rows, keep) if k_]
         keys = {
             "global": lambda r: "", "division": lambda r: r[10], "make_div": lambda r: f"{r[7]}|{r[10]}",
             "base": lambda r: f"{r[7]}|{r[9]}", "model": lambda r: f"{r[7]}|{r[8]}",
@@ -395,7 +553,7 @@ class QuoteEngine:
                 continue
             level_rows[lvl] = sub
             h = np.array([r[11] for r in sub])
-            w = np.array([score_of.get(r[6], 0.0) for r in sub]) ** 4  # closer wording counts more
+            w = np.array([weights.get(r[0], 0.0) for r in sub]) ** 4  # closer matches count more
             st = {p: _wquantile(h, w, q) for p, q in (("p25", .25), ("p50", .5), ("p80", .8), ("p90", .9))}
             n = len(sub)
             basis.append({"level": lvl, "key": key, "n": n, "p50": round(float(st["p50"]), 2),
@@ -412,7 +570,7 @@ class QuoteEngine:
             conf = "medium" if conf == "high" else "low"
         eqs = [r[12] for r in rows if r[12] and r[12] > 0]
         labor = {
-            "job_key": "SIMILAR", "display_name": text.strip(),
+            "job_key": "SIMILAR", "display_name": title,
             **{f"{p}_hours": round(float(est[p]), 2) for p in PCTS},
             "level_used": used_level or "global", "sample_size": used_n, "confidence": conf,
             "historical_eq_hours": {"level": "global", "n": len(eqs), "p50": round(float(np.median(eqs)), 2)} if len(eqs) >= 3 else None,
@@ -423,33 +581,21 @@ class QuoteEngine:
                      if len(level_rows.get(lvl, [])) >= self.settings.kit_min_segments), None) \
             or next(iter(reversed(list(level_rows))))
         pool = level_rows[spec]
-        model_counts: dict[str, int] = {}
-        for r in level_rows.get("model", []):
-            model_counts[r[6]] = model_counts.get(r[6], 0) + 1
-        matched = sorted(({"description": t, "score": sc, "segments": n, "on_this_model": model_counts.get(t, 0)}
-                          for t, sc, n in matches),
-                         key=lambda d: (-d["score"], -d["on_this_model"], -d["segments"]))[:15]
-        recent = sorted(pool, key=lambda r: (score_of.get(r[6], 0), r[4]), reverse=True)[:8]
+        recent = sorted(pool, key=lambda r: (round(weights.get(r[0], 0), 3), r[4]), reverse=True)[:8]
         evidence = [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
                      "invoice_date": str(r[4]), "description": r[5], "actual_hours": r[11], "eq_hours": r[12],
-                     "model": r[8], "match_score": score_of.get(r[6])} for r in recent]
-        parts = []
-        if include_parts:
-            parts = [self._kit_from_segments([r[0] for r in pool], spec)]
+                     "model": r[8], "match_score": round(weights.get(r[0], 0), 3)} for r in recent]
+        parts = [self._kit_from_segments([r[0] for r in pool], spec)] if include_parts else []
         warnings = []
-        if best < 0.7:
-            warnings.append("Closest past descriptions are only a loose match - check the matched descriptions.")
         if not m.known_model:
             warnings.append(f"Model {m.model} not in history; using base model {m.base_model} / division {m.division}.")
         return {
-            "mode": "similar_history", "query": text,
             "machine": {"make": m.make, "model": m.model, "base_model": m.base_model, "division": m.division,
                         "known_model": m.known_model},
             "jobs": [], "labor": [labor],
-            "total": {k2: labor[k2] for k2 in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")} | {"method": "similar_history"},
-            "parts": parts, "parts_included": include_parts,
-            "matched_descriptions": matched, "matched_segments": len(rows),
-            "similar_work_orders": evidence, "warnings": warnings,
+            "total": {k2: labor[k2] for k2 in ("p25_hours", "p50_hours", "p80_hours", "p90_hours")},
+            "parts": parts, "parts_included": include_parts, "matched_segments": len(rows),
+            "similar_work_orders": evidence, "warnings": warnings, "_model_rows": level_rows.get("model", []),
         }
 
     def _kit_from_segments(self, ids: list[str], level: str) -> dict:

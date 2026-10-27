@@ -119,3 +119,36 @@ def test_search_endpoints(client):
     models = client.get("/models", params={"make": "JD", "q": "333"}).json()
     assert {m["model"] for m in models} >= {"333G", "333P"}
     assert client.get("/").status_code == 200
+
+
+def test_parts_only_quote(client):
+    r = client.post("/quotes", json={"make": "JD", "model": "333G", "part_numbers": ["ty25879b"]})
+    assert r.status_code == 200, r.text
+    q = r.json()
+    assert q["mode"] == "parts_history"
+    assert [j["job_code"] for j in q["inferred_jobs"]] == ["BATTERY"]
+    assert 0.8 <= q["total"]["p50_hours"] <= 3.5
+    assert any("BATTER" in d["description"] or "START" in d["description"] for d in q["matched_descriptions"])
+    assert q["parts_query"][0]["part_number"] == "TY25879B"
+
+
+def test_parts_for_two_repairs_are_combined(client):
+    q = client.post("/quotes", json={"make": "JD", "model": "544P",
+                                     "part_numbers": ["TY25879B", "SE501406", "CRSE501406"]}).json()
+    assert q["total"]["method"] == "parts_history_combined"
+    assert {j["job_code"] for j in q["inferred_jobs"]} == {"BATTERY", "STARTER"}
+    assert q["total"]["p50_hours"] >= max(l["p50_hours"] for l in q["labor"])
+
+
+def test_parts_edge_cases(client):
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "part_numbers": ["NOPE1", "TY25879B"]}).json()
+    assert q["unknown_parts"] == ["NOPE1"] and any("NOPE1" in w for w in q["warnings"])
+    assert client.post("/quotes", json={"make": "JD", "model": "333G", "part_numbers": ["NOPE1"]}).status_code == 422
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "part_numbers": ["51M7044"]}).json()
+    assert any("consumables" in w for w in q["warnings"])
+    # a description narrows a parts query
+    q = client.post("/quotes", json={"make": "JD", "model": "544P", "part_numbers": ["R526607"],
+                                     "job_text": "valve lash adjustment"}).json()
+    assert q["mode"] == "parts_history" and q["total"]["p50_hours"] > 2
+    lk = client.get("/parts/lookup", params={"part_numbers": "TY25879B, nope9"}).json()
+    assert lk["known"][0]["component"] == "BATTERY" and lk["unknown"] == ["nope9"]

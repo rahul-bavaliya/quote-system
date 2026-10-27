@@ -73,6 +73,22 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
         from scoped where actual_hours > 0 and actual_hours <= {settings.max_hours} and norm_text <> ''
     """)
     con.execute("create index if not exists ix_pool_text on text_pool (norm_text)")
+    # parts-based matching: how much each part number tells you about the job (idf) and per-segment norms
+    con.execute("""
+        create or replace temp table seg_parts as
+        select distinct p.service_order_id, p.part_number
+        from parts p join text_pool t using (service_order_id) join part_taxonomy x using (part_number)
+        where x.role <> 'fee';
+        create or replace table part_idf as
+        with n as (select count(distinct service_order_id) as total from seg_parts)
+        select part_number, regexp_replace(part_number, '[^A-Z0-9]', '', 'g') as pn_key, count(*) as segs,
+               ln(any_value(n.total) / count(*)) + 1 as idf
+        from seg_parts, n group by part_number;
+        create or replace table seg_part_norm as
+        select s.service_order_id, sqrt(sum(i.idf * i.idf)) as norm, count(*) as n_parts
+        from seg_parts s join part_idf i using (part_number) group by 1;
+        create index if not exists ix_parts_pn on parts (part_number);
+    """)
     texts = con.execute("select norm_text, count(*) from text_pool group by 1 order by 1").fetchall()
     idx_tmp = index_dir_for(db_path).with_name(index_dir_for(db_path).name + ".building")
     shutil.rmtree(idx_tmp, ignore_errors=True)

@@ -7,6 +7,7 @@ Docs at /docs, the quoting page at /.
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -70,6 +71,9 @@ class QuoteRequest(BaseModel):
     job_text: str | None = Field(None, description="Free text, e.g. 'replace battery' or 'battery and starter R&R'",
                                  examples=["replace batteries"])
     job_codes: list[str] | None = Field(None, description="Job codes from /jobs, e.g. ['BATTERY']")
+    part_numbers: list[str] | None = Field(
+        None, description="Quote from the parts alone (no description needed): labour of past jobs that used "
+                          "the same parts. job_text, if given too, narrows the match.", examples=[["TY25879B"]])
     include_parts: bool = Field(True, description="False when the customer supplies the parts - labour is unchanged")
     division: str | None = Field(None, description="Override the division (contract type) if the model is new")
     match: Literal["auto", "context", "job"] = Field(
@@ -78,8 +82,8 @@ class QuoteRequest(BaseModel):
 
     @model_validator(mode="after")
     def need_job(self):
-        if not self.job_text and not self.job_codes:
-            raise ValueError("give job_text or job_codes")
+        if not self.job_text and not self.job_codes and not [p for p in (self.part_numbers or []) if str(p).strip()]:
+            raise ValueError("give job_text, job_codes or part_numbers")
         return self
 
 
@@ -139,6 +143,17 @@ def create_quote(req: QuoteRequest):
     if not codes and text and req.match != "context":
         codes = e.resolve_jobs(text)
 
+    pns = [str(p).strip() for p in (req.part_numbers or []) if str(p).strip()]
+    if pns and not codes:
+        result = e.parts_quote(pns, m, include_parts=req.include_parts, text=text or None)
+        if result is not None:
+            result["quote_id"] = state.store.save(req.model_dump(), result)
+            return result
+        if not text:
+            raise HTTPException(422, {"error": f"none of these part numbers are in the parts history: {pns}",
+                                      "suggestions": [], "diagnosis": None,
+                                      "hint": "check the part numbers (superseded numbers may differ) or add a job description"})
+
     result = None
     ctx = e.similar_quote(text, m, include_parts=req.include_parts) if text else None
     strong = bool(ctx and ctx["matched_descriptions"] and ctx["matched_descriptions"][0]["score"] >= 0.7)
@@ -175,6 +190,13 @@ def create_quote(req: QuoteRequest):
                                       "hours below are for this kind of call; see the likely fixes.")
     result["quote_id"] = state.store.save(req.model_dump(), result)
     return result
+
+
+@app.get("/parts/lookup")
+def parts_lookup(part_numbers: str):
+    """Check part numbers (comma separated): description, role and how often each appears in history."""
+    known, unknown = engine().resolve_parts([p for p in re.split(r"[,\s;]+", part_numbers) if p])
+    return {"known": known, "unknown": unknown}
 
 
 @app.get("/similar")

@@ -58,6 +58,11 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
 * **P50** is the typical job. **P80** is a safe quote: in backtests about 80 % of real jobs came in at or under it.
 * `job_text` is free text, in English or French, and is matched by **meaning**, not word for word. `"VALVE LASH ADJUSTMENT"` also finds past segments written `"SET ENGINE VALVES"`, `"ADJUST VALVE CLEARANCE"`, `"PERFORM VALVE SET"` and `"AJUSTEMENT DES VALVES"`. It works for any job that appears in your history, not only the job list.
 * `match`: `auto` (default) uses the context match when past work matches well, otherwise the fixed job list. `context` forces the context match; `job` uses only the job list (battery, starter, PM_500 …). The other method's answer is attached for comparison (`job_list_check` / `context_check`).
+* **Parts only.** Send `part_numbers` with no description, e.g. `{"make":"JD","model":"333G","part_numbers":["TY25879B"]}`. The quote comes from past segments that used the same parts. Parts are weighted by how much they say about the job: a starter identifies the repair, an o-ring barely does. The response shows what those parts were used for ("REPLACE BATTERY", "D/R NO START" …).
+  - Parts for two repairs (battery + starter) are quoted per repair, then combined using past combined jobs.
+  - Core returns (`CR…`) follow their part.
+  - Unknown part numbers are listed and ignored.
+  - Adding `job_text` as well narrows the match.
 * `include_parts: false` covers customer-supplied parts. Labour is unchanged and the kit is dropped.
 * **Symptoms.** `"machine not starting"` is quoted from past no-start calls, and the response also includes a diagnosis: on similar machines, what share of no-start segments were fixed by a battery, a starter, a fuel pump …, and how many had no part-identified fix. Each fix has its own hours and can be quoted with one click on the page.
 * Every quote is saved (`data/quotes.sqlite`). Record what the job really took with `POST /quotes/{id}/actual`. `GET /accuracy` tracks how quotes compare with actuals.
@@ -67,6 +72,7 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/quotes` | Quote a job (free text or job codes) on a make/model |
+| GET | `/parts/lookup?part_numbers=TY25879B,SE501406` | Check part numbers: description, role, repair, history count |
 | GET | `/similar?q=valve lash adjustment&make=JD&model=770GP` | Context match only: matched past descriptions, hours, parts |
 | GET | `/quotes/{id}` · POST `/quotes/{id}/actual` | Read a saved quote / record actual hours |
 | GET | `/diagnose?symptom=no start&make=JD&model=333G` | Which repairs usually fix a symptom |

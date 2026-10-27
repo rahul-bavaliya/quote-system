@@ -131,6 +131,20 @@ class TextIndex:
         self.X = sp.load_npz(out_dir / "tfidf.npz").tocsr()
         self.XT = self.X.T.tocsr()
         self.Z = np.load(out_dir / "lsa.npy", mmap_mode="r")
+        self.row_of = {t: i for i, t in enumerate(self.texts)}
+
+    def score_texts(self, query: str, texts: list[str]) -> dict[str, float]:
+        """Similarity of ``query`` to specific indexed descriptions (same 0-1 scale as search)."""
+        q = self.vec.transform([query])
+        idx = [self.row_of[t] for t in texts if t in self.row_of]
+        if q.nnz == 0 or not idx:
+            return {}
+        s_t = np.asarray((self.X[idx] @ q.T).todense()).ravel()
+        qz = self.svd.transform(q).ravel()
+        norm = np.linalg.norm(qz)
+        s_l = np.asarray(self.Z[idx] @ (qz / norm)) if norm > 0 else np.zeros_like(s_t)
+        sc = W_TFIDF * s_t + W_LSA * np.clip(s_l, 0, 1)
+        return {self.texts[i]: float(v) for i, v in zip(idx, sc)}
 
     def search(self, query: str, limit: int = 300, min_score: float = 0.55, rel: float = 0.75) -> list[tuple[str, float, int]]:
         """Descriptions whose meaning matches the query: (text, score 0-1, segments)."""

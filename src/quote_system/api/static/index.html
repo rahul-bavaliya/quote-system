@@ -30,7 +30,7 @@ h2{font-size:15px;margin:0 0 10px}.muted{color:var(--muted)}.small{font-size:12p
 .err{color:var(--err)}.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .chips button{background:var(--chip);color:var(--ink);font-weight:500}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media (max-width:760px){.grid2{grid-template-columns:1fr}}
-.hidden{display:none}.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.hidden{display:none}.full{grid-column:1/-1}.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 </style>
 </head>
 <body>
@@ -40,11 +40,13 @@ h2{font-size:15px;margin:0 0 10px}.muted{color:var(--muted)}.small{font-size:12p
     <form id="f" autocomplete="off">
       <div><label for="make">Make</label><input id="make" list="makes" value="JD" required></div>
       <div><label for="model">Model</label><input id="model" list="models" placeholder="333G" required></div>
-      <div class="wide"><label for="job">Job (free text or pick)</label><input id="job" list="jobs" placeholder="valve lash adjustment, replace battery, cab door hinge broken, not starting…" required></div>
+      <div class="wide"><label for="job">Job (free text or pick)</label><input id="job" list="jobs" placeholder="valve lash adjustment, replace battery, cab door hinge broken, not starting…"></div>
       <div><label for="match">Understand job by</label><select id="match">
         <option value="auto">Auto (context first)</option><option value="context">Context (past work)</option><option value="job">Job list only</option></select></div>
       <label class="chk"><input type="checkbox" id="parts" checked> include parts</label>
       <button type="submit">Quote</button>
+      <div class="full"><label for="pns">Part numbers (optional – quote from parts alone, or with a job to narrow it)</label>
+        <input id="pns" placeholder="e.g. TY25879B, SE501406  (comma or space separated)"></div>
     </form>
     <datalist id="makes"></datalist><datalist id="models"></datalist><datalist id="jobs"></datalist>
     <p id="msg" class="small err"></p>
@@ -74,14 +76,25 @@ $('#model').addEventListener('input', () => { clearTimeout(t); t = setTimeout(as
   if (r.ok) $('#models').innerHTML = r.body.map(m => `<option value="${esc(m.model)}">${m.segments} segments</option>`).join('');
 }, 200); });
 
-$('#f').addEventListener('submit', e => { e.preventDefault(); quote({job_text: $('#job').value}); });
+$('#f').addEventListener('submit', e => {
+  e.preventDefault();
+  const pns = $('#pns').value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+  const job = $('#job').value.trim();
+  if (!job && !pns.length) { $('#msg').textContent = 'Enter a job description or at least one part number.'; return; }
+  const spec = {};
+  if (job) spec.job_text = job;
+  if (pns.length) spec.part_numbers = pns;
+  quote(spec);
+});
+$('#job').addEventListener('input', () => { $('#msg').textContent = ''; });
+$('#pns').addEventListener('input', () => { $('#msg').textContent = ''; });
 
 async function quote(jobSpec){
   $('#msg').textContent = ''; $('#out').innerHTML = '<p class="muted">Quoting…</p>';
   const body = {make: $('#make').value, model: $('#model').value, include_parts: $('#parts').checked,
                 match: $('#match').value, ...jobSpec};
   // the datalist inserts display names: map them back to codes
-  if (body.job_text && body.match !== 'context') {
+  if (body.job_text && body.match !== 'context' && !body.part_numbers) {
     const jb = await api('/jobs?limit=100');
     const hit = jb.body.find(j => j.display_name.toLowerCase() === body.job_text.toLowerCase());
     if (hit) { body.job_codes = [hit.job_code]; delete body.job_text; }
@@ -124,12 +137,19 @@ function render(q){
     <div class="big"><div><div class="n">${h(tot.p50_hours)} h</div><div class="l">typical (P50)</div></div>
     <div><div class="n">${h(tot.p80_hours)} h</div><div class="l">safe quote (P80)</div></div>
     <div><div class="n" style="font-size:20px">${h(tot.p25_hours)}–${h(tot.p90_hours)} h</div><div class="l">P25–P90 range</div></div></div>
-    <p class="small muted">Method: ${q.mode === 'similar_history' ? `context match – ${q.matched_segments.toLocaleString()} past segments with the same meaning` : esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p>
+    <p class="small muted">Method: ${q.mode === 'parts_history' ? `parts match – ${q.matched_segments.toLocaleString()} past segments that used these parts${tot.overlap_basis ? ` (repairs combined using ${esc(tot.overlap_basis)}, × ${tot.overlap_factor})` : ''}` : q.mode === 'similar_history' ? `context match – ${q.matched_segments.toLocaleString()} past segments with the same meaning` : esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor && !tot.overlap_basis ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p>
     ${q.job_list_check ? `<p class="small muted">Job list check (${esc(q.job_list_check.display)}): P50 ${h(q.job_list_check.total.p50_hours)} h / P80 ${h(q.job_list_check.total.p80_hours)} h.</p>` : ''}
     ${q.context_check ? `<p class="small muted">Context check: ${q.context_check.matched_segments.toLocaleString()} past segments worded like this took P50 ${h(q.context_check.total.p50_hours)} h / P80 ${h(q.context_check.total.p80_hours)} h (${esc(q.context_check.level_used)} level, n=${q.context_check.sample_size}).</p>` : ''}</div>`;
+  if (q.parts_query){
+    html += `<div class="card"><h2>Parts given</h2>${q.inferred_jobs.length ? `<p class="small muted">Main parts point to: ${q.inferred_jobs.map(j => esc(j.display_name)).join(' + ')}</p>` : ''}
+      <div class="scroll"><table><tr><th>Part</th><th>Desc</th><th>Role</th><th>Repair</th><th class="num">Past segments</th></tr>` +
+      q.parts_query.map(p => `<tr><td>${esc(p.part_number)}</td><td>${esc(p.description)}</td><td class="small muted">${esc(p.role)}</td><td>${esc(p.component || '')}</td><td class="num">${p.history_segments}</td></tr>`).join('') +
+      (q.unknown_parts.length ? `<tr><td colspan="5" class="small err">Not in history: ${q.unknown_parts.map(esc).join(', ')}</td></tr>` : '') + '</table></div></div>';
+  }
   if (q.matched_descriptions){
-    html += `<div class="card"><h2>Matched past descriptions</h2><p class="small muted">How the job was understood: past segment descriptions with the same meaning (top 15).</p>
-      <div class="scroll"><table><tr><th>Description</th><th class="num">Match</th><th class="num">Segments</th><th class="num">On ${esc(m.model)}</th></tr>` +
+    const byParts = q.mode === 'parts_history';
+    html += `<div class="card"><h2>${byParts ? 'What these parts were used for' : 'Matched past descriptions'}</h2><p class="small muted">${byParts ? 'Descriptions of the past segments that used these parts.' : 'How the job was understood: past segment descriptions with the same meaning (top 15).'}</p>
+      <div class="scroll"><table><tr><th>Description</th><th class="num">${byParts ? 'Share' : 'Match'}</th><th class="num">Segments</th><th class="num">On ${esc(m.model)}</th></tr>` +
       q.matched_descriptions.map(d => `<tr><td>${esc(d.description)}</td><td class="num">${Math.round(d.score*100)}%</td><td class="num">${d.segments}</td><td class="num">${d.on_this_model || ''}</td></tr>`).join('') + '</table></div></div>';
   }
   if (q.diagnosis) html += `<div class="card"><h2>Likely fixes</h2>${diagHtml(q.diagnosis)}</div>`;
