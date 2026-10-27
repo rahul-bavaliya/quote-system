@@ -11,7 +11,7 @@ Quote labour hours and a parts kit for a job (e.g. **Battery R&R on a JD 333G**)
 
 ## Quick start (Codespaces)
 
-1. **Open the Codespace**: *Code → Codespaces → Create codespace on main*. Dependencies install automatically (≈1–2 min). A 2-core / 8 GB machine is enough.
+1. **Open the Codespace**: *Code → Codespaces → Create codespace on main*. Dependencies install automatically into `.venv` (≈1–2 min). A 2-core / 8 GB machine is enough. Docker is included (for `make docker-build`).
 2. **Add your data.** Company data is never committed (`.gitignore` blocks `*.xlsx`, `*.csv`, `*.parquet`, `*.duckdb`). Put the exports in `data/raw/`:
    ```
    data/raw/workorders.xlsx      # any file starting with "workorder", .xlsx or .csv
@@ -32,6 +32,8 @@ Quote labour hours and a parts kit for a job (e.g. **Battery R&R on a JD 333G**)
    make backtest     # learn from data before 2026-01-01, score quotes on later jobs
    make demo         # try everything on generated sample data
    ```
+
+**If the Codespace has no pip or no Docker** (`No module named pip`, `docker: command not found`), GitHub could not build the dev container and opened a *recovery container* instead. Press F1 → **Codespaces: Rebuild Container**. If it happens again, F1 → **Codespaces: View Creation Log** shows why. Until then `make install` still works there: all commands use a project virtualenv (`.venv`) that `scripts/bootstrap.sh` creates with its own pip, so it does not depend on the system Python having pip.
 
 To refresh with a new export, replace the files in `data/raw/` and run `make pipeline` again. Then restart `make run`, or `POST /admin/reload`.
 

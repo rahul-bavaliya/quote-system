@@ -1,6 +1,8 @@
 .PHONY: help install deps lint docker-build docker-pipeline docker-up pipeline run dev test backtest sample demo clean check-data
 
-PY ?= python
+# Python in the project virtualenv (.venv, created by `make install`); falls back to a system python if
+# .venv does not exist yet so `make help` etc. still work.
+PY ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,$(shell command -v python3 || command -v python))
 PORT ?= 8000
 
 help:
@@ -14,44 +16,44 @@ help:
 	@echo "make docker-build / docker-pipeline / docker-up   production container (see README)"
 
 install:
-	$(PY) -m pip install -e ".[dev]"
+	bash scripts/bootstrap.sh
 
-# installs the package only if it is missing (e.g. the Codespace setup step did not run)
+# installs into .venv only if something is missing (new clone, recovery container, new dependency)
 deps:
-	@$(PY) scripts/check_deps.py || \
-		(echo "Installing quote_system and dependencies..." && $(PY) -m pip install -q -e ".[dev]")
+	@(test -x .venv/bin/python && .venv/bin/python scripts/check_deps.py >/dev/null 2>&1) || \
+		(echo "Setting up .venv (first run or new dependencies)..." && bash scripts/bootstrap.sh)
 
 check-data:
 	@ls data/raw/workorder* >/dev/null 2>&1 || (echo "\n  Put workorders.xlsx (or .csv) in data/raw/ first - see README\n" && exit 1)
 	@ls data/raw/part* >/dev/null 2>&1 || (echo "\n  Put parts.xlsx (or .csv) in data/raw/ first - see README\n" && exit 1)
 
 pipeline: deps check-data
-	$(PY) -m quote_system.pipeline
+	.venv/bin/python -m quote_system.pipeline
 
 run: deps
-	$(PY) -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT)
+	.venv/bin/python -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT)
 
 dev: deps
-	$(PY) -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT) --reload
+	.venv/bin/python -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT) --reload
 
 test: deps
-	$(PY) -m pytest -q
+	.venv/bin/python -m pytest -q
 
 backtest: deps
-	$(PY) -m quote_system.backtest --cutoff 2026-01-01 --similar-sample 1500
+	.venv/bin/python -m quote_system.backtest --cutoff 2026-01-01 --similar-sample 1500
 
 sample: deps
-	$(PY) -m quote_system.sample_data data/raw-sample
+	.venv/bin/python -m quote_system.sample_data data/raw-sample
 
 demo: sample
-	QS_RAW_DIR=data/raw-sample QS_WORK_DIR=data/work-sample QS_DB_PATH=data/sample.duckdb $(PY) -m quote_system.pipeline
-	QS_DB_PATH=data/sample.duckdb $(PY) -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT)
+	QS_RAW_DIR=data/raw-sample QS_WORK_DIR=data/work-sample QS_DB_PATH=data/sample.duckdb .venv/bin/python -m quote_system.pipeline
+	QS_DB_PATH=data/sample.duckdb .venv/bin/python -m uvicorn quote_system.api.main:app --host 0.0.0.0 --port $(PORT)
 
 clean:
 	rm -rf data/work data/work-sample data/*.duckdb data/*.wal data/backtest_report.md .pytest_cache
 
 lint: deps
-	$(PY) -m ruff check src tests scripts
+	.venv/bin/python -m ruff check src tests scripts
 
 docker-build:
 	docker compose build
