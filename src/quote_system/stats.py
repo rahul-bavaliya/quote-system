@@ -76,8 +76,11 @@ def build_stats(con: duckdb.DuckDBPyConnection, settings: Settings, cutoff: str 
 
     con.execute("""
         create or replace table models as
-        select make, model, any_value(base_model) as base_model, mode(division) as division, count(*) as n_segments
-        from segments where model <> 'UNKNOWN' group by make, model
+        with d as (select make, model, base_model, division, count(*) as n from segments
+                   where model <> 'UNKNOWN' group by all)
+        select make, model, min(base_model) as base_model,
+               first(division order by n desc, division) as division, sum(n) as n_segments
+        from d group by make, model
     """)
 
     # parts kits from single-job segments

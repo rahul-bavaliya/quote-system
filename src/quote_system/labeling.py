@@ -40,7 +40,7 @@ def classify_parts(con: duckdb.DuckDBPyConnection, settings: Settings) -> pd.Dat
 
     con.execute("""
         create or replace table part_desc as
-        select part_number, arg_max(part_description, n) as description, sum(n) as lines
+        select part_number, first(part_description order by n desc, part_description) as description, sum(n) as lines
         from (select part_number, part_description, count(*) n from parts group by all)
         group by part_number
     """)
