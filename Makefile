@@ -16,7 +16,7 @@ install:
 
 # installs the package only if it is missing (e.g. the Codespace setup step did not run)
 deps:
-	@$(PY) -c "import quote_system, duckdb, fastexcel, fastapi, uvicorn" 2>/dev/null || \
+	@$(PY) scripts/check_deps.py || \
 		(echo "Installing quote_system and dependencies..." && $(PY) -m pip install -q -e ".[dev]")
 
 check-data:
