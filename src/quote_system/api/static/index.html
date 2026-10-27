@@ -164,6 +164,8 @@ function render(q){
   const locLabel = tot.location === 'SHOP' ? ' · shop' : tot.location === 'OFFSITE' ? ' · off site' : '';
   const byLoc = q.by_location || {};
   const locRows = ['SHOP', 'OFFSITE'].filter(k => byLoc[k]).map(k => { const b = byLoc[k]; return `<tr><td>${esc(b.label)}</td><td class="num">${h(b.p50_hours)}</td><td class="num">${h(b.p80_hours)}</td><td class="num">${h(b.p25_hours)}–${h(b.p90_hours)}</td><td class="small">${esc(b.level_used)} · n=${b.sample_size}</td><td><span class="pill ${b.confidence==='low'?'low':''}">${esc(b.confidence)}</span></td></tr>`; }).join('');
+  const simMachines = (m.similar_machines || []).slice(0, 6).map(x => esc(x.model)).join(', ');
+  const scaledAny = q.labor.find(l => l.scaled_to_machine_class);
   html += `<div class="card"><div class="muted small">${esc(m.make)} ${esc(m.model)}${entered} · series ${esc(m.series || '')} · ${esc(m.division || '')}${locLabel} · quote ${esc(q.quote_id)}</div>
     <h2 style="margin-top:4px">${q.labor.map(l => esc(l.display_name)).join(' + ')}</h2>
     <div class="big"><div><div class="n">${h(tot.p50_hours)} h</div><div class="l">typical (P50)</div></div>
@@ -171,6 +173,8 @@ function render(q){
     <div><div class="n" style="font-size:20px">${h(tot.p25_hours)}–${h(tot.p90_hours)} h</div><div class="l">P25–P90 range</div></div></div>
     <p class="small muted">Method: ${q.mode === 'parts_history' ? `parts match – ${q.matched_segments.toLocaleString()} past segments that used these parts${tot.overlap_basis ? ` (repairs combined using ${esc(tot.overlap_basis)}, × ${tot.overlap_factor})` : ''}` : q.mode === 'similar_history' ? `context match – ${q.matched_segments.toLocaleString()} past segments with the same meaning` : esc((tot.method||'').replaceAll('_',' '))}${tot.overlap_factor && !tot.overlap_basis ? ` (combined jobs × ${tot.overlap_factor})` : ''}</p>
     ${q.job_list_check ? `<p class="small muted">Job list check (${esc(q.job_list_check.display)}): P50 ${h(q.job_list_check.total.p50_hours)} h / P80 ${h(q.job_list_check.total.p80_hours)} h.</p>` : ''}
+    ${simMachines ? `<p class="small muted">Similar machines (learned from parts and work history): ${simMachines}</p>` : ''}
+    ${scaledAny ? `<p class="small muted">No close history for this exact job on these machines: wider history was scaled ×${scaledAny.scaled_to_machine_class.factor} to this machine class.</p>` : ''}
     ${locRows ? `<div class="scroll" style="margin-top:10px"><table><tr><th>Shop vs off-site</th><th class="num">Typical (P50)</th><th class="num">Safe (P80)</th><th class="num">P25–P90</th><th>Based on</th><th>Confidence</th></tr>${locRows}</table></div>` : ''}
     ${q.context_check ? `<p class="small muted">Context check: ${q.context_check.matched_segments.toLocaleString()} past segments worded like this took P50 ${h(q.context_check.total.p50_hours)} h / P80 ${h(q.context_check.total.p80_hours)} h (${esc(q.context_check.level_used)} level, n=${q.context_check.sample_size}).</p>` : ''}</div>`;
   if (q.suggested_descriptions && q.suggested_descriptions.length){
@@ -204,7 +208,9 @@ function render(q){
 
   html += `<div class="card"><h2>Labour by job</h2><div class="scroll"><table><tr><th>Job</th><th class="num">P50</th><th class="num">P80</th><th>Based on</th><th>Confidence</th><th class="num">EQ hrs (hist.)</th></tr>` +
     q.labor.map(l => `<tr><td>${esc(l.display_name)}</td><td class="num">${h(l.p50_hours)}</td><td class="num">${h(l.p80_hours)}</td>
-      <td class="small">${esc(l.level_used)} · n=${l.sample_size}<br><span class="muted">${l.basis.map(b => `${b.level} ${b.n}`).join(' · ')}</span></td>
+      <td class="small">${esc(l.level_used)} · n=${l.sample_size}<br><span class="muted">${l.basis.map(b => `${b.level} ${b.n}`).join(' · ')}</span>
+        ${(l.similar_machines_used || []).length ? `<br><span class="muted">similar machines: ${l.similar_machines_used.map(x => `${esc(x.model)} (${x.jobs})`).join(', ')}</span>` : ''}
+        ${l.scaled_to_machine_class ? `<br><span class="muted">wider history scaled ×${l.scaled_to_machine_class.factor} to this machine class – ${esc(l.scaled_to_machine_class.basis)}</span>` : ''}</td>
       <td><span class="pill ${l.confidence==='low'?'low':''}">${esc(l.confidence)}</span></td>
       <td class="num">${l.historical_eq_hours ? h(l.historical_eq_hours.p50) : '–'}</td></tr>`).join('') + '</table></div></div>';
 

@@ -95,7 +95,8 @@ def tokens(text: str) -> list[str]:
 def analyze(text: str) -> list[str]:
     """Analyzer for TfidfVectorizer: tokens + adjacent pairs (module level so it can be pickled)."""
     tk = tokens(text)
-    return tk + [f"{a} {b}" for a, b in zip(tk, tk[1:], strict=False)]
+    # pairs are order-free: 'REPLACE ARM CYLINDER' and 'ARM CYLINDER, R&R' describe the same job
+    return tk + [" ".join(sorted((a, b))) for a, b in zip(tk, tk[1:], strict=False)]
 
 
 W_TFIDF, W_LSA = 0.6, 0.4

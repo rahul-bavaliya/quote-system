@@ -9,7 +9,7 @@ import difflib
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
@@ -20,7 +20,7 @@ from .normalize import MakeResolver, base_of, model_key, series_of
 from .rules import jobs_from_text, normalize_text, symptoms_from_text
 from .textsearch import TextIndex, index_dir_for
 
-LEVEL_ORDER = ("global", "division", "make_div", "base", "series", "model")  # least -> most specific
+LEVEL_ORDER = ("global", "division", "make_div", "similar", "base", "series", "model")  # least -> most specific
 LOCATIONS = {"SHOP": "Shop", "OFFSITE": "Off site"}
 PCTS = ("p25", "p50", "p80", "p90")
 
@@ -48,6 +48,7 @@ class Machine:
     make_input: str = ""
     model_input: str = ""
     make_resolution: str = "exact"
+    neighbors: list = field(default_factory=list)   # [(model, similarity)] learned similar machines
 
     def key(self, level: str) -> str | None:
         if level == "global":
@@ -60,12 +61,15 @@ class Machine:
             return f"{self.make}|{self.base_model}"
         if level == "series":
             return f"{self.make}|{self.series}"
+        if level == "similar":
+            return f"{self.make}|~similar" if self.neighbors else None
         return f"{self.make}|{self.model}"
 
     def as_dict(self) -> dict:
         d = {"make": self.make, "model": self.display_model or self.model, "model_key": self.model,
              "series": self.series, "base_model": self.base_model, "division": self.division,
-             "known_model": self.known_model}
+             "known_model": self.known_model,
+             "similar_machines": [{"model": md, "similarity": round(s, 2)} for md, s in self.neighbors]}
         if self.make_input and (normalize_text(self.make_input) != self.make or self.make_resolution != "exact"):
             d["make_entered"] = self.make_input
             d["make_resolved_by"] = self.make_resolution
@@ -132,6 +136,14 @@ class QuoteEngine:
         for (mk, _), v in self.models.items():
             make_totals[mk] = make_totals.get(mk, 0) + v["n"]
         make_map = dict(c.execute("select raw_clean, canonical from make_map").fetchall())
+        self.neighbors: dict[tuple[str, str], list[tuple[str, float]]] = {}
+        try:
+            nb_rows = c.execute("select make, model, neighbor, sim from model_neighbors order by make, model, rank").fetchall()
+            for mk, md, nb, sim in nb_rows:
+                self.neighbors.setdefault((mk, md), []).append((nb, sim))
+        except duckdb.CatalogException:  # database built before similar machines existed
+            pass
+        self._sim_cache: dict = {}
         self.makes_resolver = MakeResolver(make_map, make_totals, str(self.settings.config_dir))
         self.catalog = {code: {"job_code": code, "display_name": name, "category": cat,
                                "synonyms": [s for s in (syn or "").split(";") if s]}
@@ -153,7 +165,7 @@ class QuoteEngine:
         hit = self.models.get((mk, md))
         if hit:
             return Machine(mk, md, hit["series"], hit["base"], division or hit["division"], True, hit["display"],
-                           make, model, how)
+                           make, model, how, self._neighbors_for(mk, md, hit["series"], hit["base"]))
         ser = series_of(md)
         base = base_of(ser)
         # unknown model: borrow the division from models of the same series, then base model, then make
@@ -164,16 +176,116 @@ class QuoteEngine:
                 if cands:
                     div = max(cands)[1]
                     break
-        return Machine(mk, md, ser, base, div, False, "", make, model, how)
+        return Machine(mk, md, ser, base, div, False, "", make, model, how, self._neighbors_for(mk, md, ser, base))
+
+    def _neighbors_for(self, mk: str, md: str, ser: str, base: str) -> list[tuple[str, float]]:
+        """Learned similar machines; for a model with little / no history, borrow them from the busiest
+        model of the same series (or base), which itself counts as the closest neighbour."""
+        nb = self.neighbors.get((mk, md))
+        if nb:
+            return nb
+        for pick in (lambda v: v["series"] == ser, lambda v: v["base"] == base):
+            cands = [(v["n"], m2) for (k2, m2), v in self.models.items() if k2 == mk and m2 != md and pick(v)
+                     and (k2, m2) in self.neighbors]
+            if cands:
+                anchor = max(cands)[1]
+                return [(anchor, 1.0)] + [(n, s) for n, s in self.neighbors[(mk, anchor)] if n != md][:7]
+        return []
 
     # ------------------------------------------------------------------ labour
-    def _stat(self, job_key: str, lvl: str, key: str, location: str | None) -> dict | None:
+    BROAD_LEVELS = ("make_div", "division", "global")
+
+    def class_factor(self, m: Machine, ref_level: str, related_jobs: list[str]) -> dict | None:
+        """How long this machine class (the model + its similar machines) takes compared with the broader
+        level a quote had to fall back to, measured on jobs both have done.
+
+        The ratio of the related job (e.g. HYD_CYLINDER for an arm cylinder) counts most; the median over
+        all shared jobs is the fallback. Returns None when there is not enough shared history."""
+        ref_key = m.key(ref_level)
+        if ref_key is None:
+            return None
+        ck = ("factor", m.make, m.model, ref_level, tuple(related_jobs))
+        if ck in self._sim_cache:
+            return self._sim_cache[ck]
+        group = [m.model] + [md for md, _ in m.neighbors]
+        rows = self.cursor().execute("""select job_key, count(*), median(actual_hours) from hours_clean
+            where make = ? and model in (select unnest(?)) and n_jobs = 1 group by 1 having count(*) >= 5""",
+                                     [m.make, group]).fetchall()
+        comps = {c for c, v in self.catalog.items() if v["category"] == "component"}
+        pairs = []
+        for job, n, p50 in rows:
+            ref = self.stats.get((job, ref_level, ref_key))
+            if job in comps and ref and ref["n"] >= 20 and p50 > 0 and ref["p50"] > 0:
+                pairs.append((job, int(n), float(p50), float(ref["p50"]), float(np.log(p50 / ref["p50"]))))
+        out = None
+        if len(pairs) >= 3:
+            w = np.array([min(p_[1], 50) for p_ in pairs], dtype=float)
+            r = np.array([p_[4] for p_ in pairs])
+            order = np.argsort(r)
+            overall = float(r[order][np.searchsorted(np.cumsum(w[order]) / w.sum(), 0.5)])
+            log_f, basis = overall, f"median of {len(pairs)} shared job types"
+            rel = [p_ for p_ in pairs if p_[0] in related_jobs]
+            if rel:
+                j = max(rel, key=lambda p_: p_[1])
+                k = self.settings.shrink_k
+                log_f = (j[1] * j[4] + k * overall) / (j[1] + k)
+                basis = (f"{self.catalog.get(j[0], {}).get('display_name', j[0])}: {j[2]:.1f} h on similar machines "
+                         f"vs {j[3]:.1f} h at {ref_level} level ({j[1]} jobs), shrunk toward the {len(pairs)}-job median")
+            f = float(np.clip(np.exp(log_f), 0.3, 3.0))
+            out = {"factor": round(f, 3), "from_level": ref_level, "basis": basis, "shared_jobs": len(pairs),
+                   "machine_group": group}
+        self._sim_cache[ck] = out
+        return out
+
+    def _apply_factor(self, est: dict, used_level: str, m: Machine, related: list[str]) -> dict | None:
+        """Scale an estimate that came from a broad level to this machine class. Mutates est."""
+        if used_level not in self.BROAD_LEVELS or not m.neighbors:
+            return None
+        cf = self.class_factor(m, used_level, related)
+        if not cf or abs(np.log(cf["factor"])) < 0.05:
+            return None
+        for p_ in PCTS:
+            est[p_] = est[p_] * cf["factor"]
+        return cf
+
+    def _similar_stat(self, job_key: str, m: Machine, location: str | None) -> dict | None:
+        """Hours of this job on the learned similar machines, weighted by similarity."""
+        ck = (job_key, m.make, m.model, location)
+        if ck in self._sim_cache:
+            return self._sim_cache[ck]
+        sims = dict(m.neighbors)
+        rows = self.cursor().execute(f"""
+            select model, actual_hours, eq_hours from hours_clean
+            where job_key = ? and make = ? and model in (select unnest(?)) {"and location = ?" if location else ""}
+        """, [job_key, m.make, list(sims)] + ([location] if location else [])).fetchall()
+        out = None
+        if rows:
+            h = np.array([r[1] for r in rows], dtype=float)
+            w = np.array([sims[r[0]] for r in rows], dtype=float)
+            eq = [r[2] for r in rows if r[2] and r[2] > 0]
+            per: dict[str, int] = {}
+            for r in rows:
+                per[r[0]] = per.get(r[0], 0) + 1
+            out = {"n": len(rows), **{p: _wquantile(h, w, q) for p, q in (("p25", .25), ("p50", .5), ("p80", .8), ("p90", .9))},
+                   "mean": float(np.average(h, weights=w)), "eq_n": len(eq), "eq_p50": float(np.median(eq)) if eq else None,
+                   "models": [{"model": md, "similarity": round(sims[md], 2), "jobs": per[md]}
+                              for md, _ in m.neighbors if md in per]}
+        if len(self._sim_cache) > 20000:
+            self._sim_cache.clear()
+        self._sim_cache[ck] = out
+        return out
+
+    def _stat(self, job_key: str, lvl: str, key: str, location: str | None, m: Machine | None = None) -> dict | None:
+        if lvl == "similar":
+            return self._similar_stat(job_key, m, location) if m is not None else None
         if location:
             return self.stats_loc.get((job_key, lvl, key, location))
         return self.stats.get((job_key, lvl, key))
 
     def labor_estimate(self, job_key: str, m: Machine, location: str | None = None) -> dict | None:
         k = self.settings.shrink_k
+        similar_used: list = []
+        scaled, scale_checked, broad_level = None, False, "global"
         est: dict | None = None
         basis = []
         used_level, used_n = None, 0
@@ -181,9 +293,16 @@ class QuoteEngine:
             key = m.key(lvl)
             if key is None:
                 continue
-            s = self._stat(job_key, lvl, key, location)
+            s = self._stat(job_key, lvl, key, location, m)
             if not s:
                 continue
+            if est is not None and scaled is None and not scale_checked and lvl not in self.BROAD_LEVELS:
+                scale_checked = True  # broad levels describe average machines: bring them to this class first
+                scaled = self._apply_factor(est, broad_level, m, job_key.split("+"))
+            if lvl in self.BROAD_LEVELS:
+                broad_level = lvl
+            if lvl == "similar":
+                similar_used = s["models"]
             basis.append({"level": lvl, "key": key, "n": s["n"], "p50": round(s["p50"], 2), "p80": round(s["p80"], 2)})
             if est is None:
                 est = {p: s[p] for p in PCTS}
@@ -194,6 +313,8 @@ class QuoteEngine:
                 used_level, used_n = lvl, s["n"]
         if est is None:
             return None
+        if scaled is None and not scale_checked:
+            scaled = self._apply_factor(est, broad_level, m, job_key.split("+"))
         n_model = (self._stat(job_key, "model", m.key("model"), location) or {}).get("n", 0)
         n_base = max((self._stat(job_key, "series", m.key("series"), location) or {}).get("n", 0),
                      (self._stat(job_key, "base", m.key("base"), location) or {}).get("n", 0))
@@ -206,7 +327,7 @@ class QuoteEngine:
         eq = None
         for lvl in reversed(LEVEL_ORDER):
             key = m.key(lvl)
-            s = self._stat(job_key, lvl, key, location) if key is not None else None
+            s = self._stat(job_key, lvl, key, location, m) if key is not None else None
             if s and (s["eq_n"] or 0) >= 3:
                 eq = {"level": lvl, "n": s["eq_n"], "p50": round(s["eq_p50"], 2)}
                 break
@@ -215,7 +336,8 @@ class QuoteEngine:
             "p25_hours": round(est["p25"], 2), "p50_hours": round(est["p50"], 2),
             "p80_hours": round(est["p80"], 2), "p90_hours": round(est["p90"], 2),
             "level_used": used_level or "global", "sample_size": used_n, "confidence": conf,
-            "historical_eq_hours": eq, "basis": list(reversed(basis)),
+            "historical_eq_hours": eq, "basis": list(reversed(basis)), "similar_machines_used": similar_used,
+            "scaled_to_machine_class": scaled,
         }
 
     def combo_estimate(self, jobs: list[str], m: Machine, location: str | None = None) -> dict | None:
@@ -243,9 +365,18 @@ class QuoteEngine:
     # ------------------------------------------------------------------ parts
     def parts_kit(self, job: str, m: Machine) -> dict:
         c = self.cursor()
-        for lvl in ("model", "series", "base", "make_div"):
+        for lvl in ("model", "series", "base", "similar", "make_div"):
             key = m.key(lvl)
             if key is None:
+                continue
+            if lvl == "similar":
+                ids = [r[0] for r in c.execute("""select service_order_id from segments
+                        where job_key = ? and n_jobs = 1 and status = 'Invoiced' and make = ? and model in (select unnest(?))""",
+                                               [job, m.make, [md for md, _ in m.neighbors]]).fetchall()]
+                if len(ids) >= self.settings.kit_min_segments:
+                    kit = self._kit_from_segments(ids, "similar")
+                    kit["job_code"] = job
+                    return kit
                 continue
             row = c.execute("select n_job_segments from kit_levels where level=? and job_code=? and key=?",
                             [lvl, job, key]).fetchone()
@@ -278,11 +409,13 @@ class QuoteEngine:
     # ------------------------------------------------------------------ evidence
     def similar(self, job_key: str, m: Machine, limit: int = 5) -> list[dict]:
         c = self.cursor()
-        for col, val in (("model", m.model), ("series", m.series), ("base_model", m.base_model)):
+        for col, val in (("model", m.model), ("series", m.series), ("base_model", m.base_model),
+                         ("model", [md for md, _ in m.neighbors])):
             rows = c.execute(f"""
                 select service_order_id, wo_number, wo_segment, branch, invoice_date, description, actual_hours, eq_hours,
                        coalesce(model_raw, model), location
-                from segments where job_key = ? and make = ? and {col} = ? and status = 'Invoiced' and actual_hours > 0
+                from segments where job_key = ? and make = ? and {col} {"in (select unnest(?))" if isinstance(val, list) else "= ?"}
+                  and status = 'Invoiced' and actual_hours > 0
                 order by invoice_date desc limit ?""", [job_key, m.make, val, limit]).fetchall()
             if rows:
                 return [{"service_order_id": r[0], "wo_number": r[1], "segment": r[2], "branch": r[3],
@@ -451,7 +584,8 @@ class QuoteEngine:
         if not rows:
             return None
         weights = {r[0]: score_of.get(r[6], 0.0) for r in rows}
-        out = self._pool_quote(rows, weights, m, include_parts, text.strip(), best, location)
+        out = self._pool_quote(rows, weights, m, include_parts, text.strip(), best, location,
+                               related=self.resolve_jobs(text))
         if out is None:
             return None
         model_rows = out.pop("_model_rows")
@@ -596,7 +730,7 @@ class QuoteEngine:
         main = sorted({k_["component"] for k_ in known if k_["role"] == "primary" and k_["component"]})
         title = (" + ".join(self.catalog.get(c, {}).get("display_name", c) for c in main) + f" (parts {title})"
                  if main else f"Parts {title}")
-        out = self._pool_quote(rows, scores, m, include_parts, title, best, location)
+        out = self._pool_quote(rows, scores, m, include_parts, title, best, location, related=main)
         if out is None:
             return None
         model_rows = out.pop("_model_rows")
@@ -679,20 +813,33 @@ class QuoteEngine:
         "base": lambda r: f"{r[7]}|{r[9]}", "series": lambda r: f"{r[7]}|{r[13]}", "model": lambda r: f"{r[7]}|{r[8]}",
     }
 
-    def _blend(self, rows: list, weights: dict, m: Machine) -> dict | None:
-        """Closeness-weighted percentiles per level, blended model <- series <- base <- ... <- global."""
+    def _blend(self, rows: list, weights: dict, m: Machine, related: list[str] | None = None) -> dict | None:
+        """Closeness-weighted percentiles per level, blended model <- series <- base <- similar <- ... <- global.
+        Broad levels (make+division and up) are first scaled to this machine class (see class_factor)."""
         k = self.settings.shrink_k
         est, basis, used_level, used_n, level_rows = None, [], None, 0, {}
+        scaled, scale_checked, broad_level = None, False, "global"
         for lvl in LEVEL_ORDER:
             key = m.key(lvl)
             if key is None:
                 continue
-            sub = [r for r in rows if self._POOL_KEYS[lvl](r) == key]
+            if lvl == "similar":
+                sims = dict(m.neighbors)
+                sub = [r for r in rows if r[7] == m.make and r[8] in sims]
+            else:
+                sub = [r for r in rows if self._POOL_KEYS[lvl](r) == key]
             if not sub:
                 continue
+            if est is not None and scaled is None and not scale_checked and lvl not in self.BROAD_LEVELS:
+                scale_checked = True
+                scaled = self._apply_factor(est, broad_level, m, related or [])
+            if lvl in self.BROAD_LEVELS:
+                broad_level = lvl
             level_rows[lvl] = sub
             h = np.array([r[11] for r in sub])
             w = np.array([weights.get(r[0], 0.0) for r in sub]) ** 4  # closer matches count more
+            if lvl == "similar":
+                w = w * np.array([sims[r[8]] for r in sub])
             st = {p: _wquantile(h, w, q) for p, q in (("p25", .25), ("p50", .5), ("p80", .8), ("p90", .9))}
             n = len(sub)
             basis.append({"level": lvl, "key": key, "n": n, "p50": round(float(st["p50"]), 2),
@@ -702,33 +849,42 @@ class QuoteEngine:
                 used_level, used_n = lvl, n
         if est is None:
             return None
+        if scaled is None and not scale_checked:
+            scaled = self._apply_factor(est, broad_level, m, related or [])
         n_model = len(level_rows.get("model", []))
-        n_mid = max(len(level_rows.get("series", [])), len(level_rows.get("base", [])))
+        n_mid = max(len(level_rows.get("series", [])), len(level_rows.get("base", [])), len(level_rows.get("similar", [])))
         conf = "high" if n_model >= 20 else "medium" if (n_model >= 5 or n_mid >= 20) else "low"
+        sim_used = []
+        if "similar" in level_rows:
+            per: dict[str, int] = {}
+            for r in level_rows["similar"]:
+                per[r[8]] = per.get(r[8], 0) + 1
+            sim_used = [{"model": md, "similarity": round(s_, 2), "jobs": per[md]} for md, s_ in m.neighbors if md in per]
         return {"est": est, "basis": basis, "level_used": used_level or "global", "sample_size": used_n,
-                "confidence": conf, "level_rows": level_rows}
+                "confidence": conf, "level_rows": level_rows, "similar_used": sim_used, "scaled": scaled}
 
     def _pool_quote(self, rows: list, weights: dict, m: Machine, include_parts: bool, title: str,
-                    best: float, location: str | None = None) -> dict | None:
+                    best: float, location: str | None = None, related: list[str] | None = None) -> dict | None:
         hours = np.array([r[11] for r in rows], dtype=float)
         lh = np.log(hours)
         med = np.median(lh)
         mad = max(1.4826 * np.median(np.abs(lh - med)), 0.1)
         keep = np.abs(lh - med) / mad <= self.settings.outlier_mad_z
         rows = [r for r, k_ in zip(rows, keep, strict=False) if k_]
-        allb = self._blend(rows, weights, m)
+        related = related or []
+        allb = self._blend(rows, weights, m, related)
         if allb is None:
             return None
         by_location = {}
         for loc, label in LOCATIONS.items():
-            b = self._blend([r for r in rows if r[14] == loc], weights, m)
+            b = self._blend([r for r in rows if r[14] == loc], weights, m, related)
             if b:
                 by_location[loc] = {"label": label, **{f"{p}_hours": round(float(b["est"][p]), 2) for p in PCTS},
                                     "level_used": b["level_used"], "sample_size": b["sample_size"],
                                     "confidence": b["confidence"]}
         main = allb
         if location:
-            lb = self._blend([r for r in rows if r[14] == location], weights, m)
+            lb = self._blend([r for r in rows if r[14] == location], weights, m, related)
             if lb:
                 main = lb
         conf = main["confidence"]
@@ -740,11 +896,12 @@ class QuoteEngine:
             **{f"{p}_hours": round(float(main["est"][p]), 2) for p in PCTS},
             "level_used": main["level_used"], "sample_size": main["sample_size"], "confidence": conf,
             "historical_eq_hours": {"level": "global", "n": len(eqs), "p50": round(float(np.median(eqs)), 2)} if len(eqs) >= 3 else None,
-            "basis": list(reversed(main["basis"])),
+            "basis": list(reversed(main["basis"])), "similar_machines_used": main["similar_used"],
+            "scaled_to_machine_class": main.get("scaled"),
         }
         level_rows = allb["level_rows"]
         # the most specific level with enough segments drives evidence and parts
-        spec = next((lvl for lvl in ("model", "series", "base", "make_div", "division", "global")
+        spec = next((lvl for lvl in ("model", "series", "base", "similar", "make_div", "division", "global")
                      if len(level_rows.get(lvl, [])) >= self.settings.kit_min_segments), None) \
             or next(iter(reversed(list(level_rows))))
         pool = level_rows[spec]

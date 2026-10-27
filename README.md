@@ -61,6 +61,7 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
 
 * **P50** is the typical job. **P80** is a safe quote: in backtests about 80 % of real jobs came in at or under it.
 * **Shop vs off-site.** Every quote includes `by_location` with separate hours for shop and off-site (field) work, from the ShopOffsite field of past segments. Send `"location": "shop"` or `"offsite"` to make that location the headline number. Off-site travel is a separate job (`TRAVEL`); quote it as well if the call needs it.
+* **Similar machines.** When a model has little or no history for the job, its learned similar machines are used before the broad levels, and broad history is scaled to the machine class. See [Similar machines](#similar-machines).
 * **Make and model can be written any way.** "John Deere", "Deere", "JDE" → `JD`; "135G LC", "135G-LC" → `135GLC`. `GET /machines/resolve?make=…&model=…` shows how an entry is read. See [Messy makes and models](#messy-makes-and-models).
 * `job_text` is free text, in English or French, and is matched by **meaning**, not word for word. `"VALVE LASH ADJUSTMENT"` also finds past segments written `"SET ENGINE VALVES"`, `"ADJUST VALVE CLEARANCE"`, `"PERFORM VALVE SET"` and `"AJUSTEMENT DES VALVES"`. It works for any job that appears in your history, not only the job list.
 * `match`: `auto` (default) uses the context match when past work matches well, otherwise the fixed job list. `context` forces the context match; `job` uses only the job list (battery, starter, PM_500 …). The other method's answer is attached for comparison (`job_list_check` / `context_check`).
@@ -122,7 +123,7 @@ Diagnose and inspection are dropped when the real repair is present. Segments wi
 
 A query takes the tightest similarity cut that still leaves ≥ 40 past segments. Hours are weighted by how close each description is, and then blended model → base → make+division → division → all, exactly like job-list quotes.
 
-**3. Statistics.** Only invoiced segments are used, Expense jobs and future invoice dates are excluded, and hour outliers are removed with a robust z-score on log hours per job. Percentiles are computed at 6 levels, overall and separately for shop and off-site: model (135GLC) → series (135G) → base model (135) → make+division → division → all. A quote **blends** the levels, `est = (n·level + k·parent)/(n + k)` with k = 8, so 4 battery jobs on a rare model are pulled toward what similar machines take.
+**3. Statistics.** Only invoiced segments are used, Expense jobs and future invoice dates are excluded, and hour outliers are removed with a robust z-score on log hours per job. Percentiles are computed overall and separately for shop and off-site, at: model (135GLC) → series (135G) → base model (135) → similar machines → make+division → division → all. A quote **blends** the levels, `est = (n·level + k·parent)/(n + k)` with k = 8, so 4 battery jobs on a rare model are pulled toward what similar machines take.
 
 Combined jobs come from history when the combination has ≥ 10 cases. Otherwise the per-job hours are added and multiplied by an overlap factor learned from multi-repair segments (shared access time).
 
@@ -152,6 +153,22 @@ The exports contain the same brand under many spellings: JD, JDE, DEERE, JOHN, "
 4. **Review.** Each build writes `data/review/make_mapping.csv`, listing every merged spelling with its method, segment count and model overlap. It also writes `model_variants.csv`, listing every model written more than one way. If a decision is wrong, add a line to the alias files and rebuild.
 
 Variants are not forced together. **135G and 135GLC stay separate models in the same series (135G)**, so a 135GLC quote uses 135GLC history first and borrows from 135G and then the 135 family only as needed. Requests go through the same rules: "Hitachi" → HIT by prefix, and an unknown model like "135GX" falls back to its series/base. The response shows what was entered and how it was read.
+
+## Similar machines
+
+The exports have no machine-type or size field, so the pipeline learns which models are alike (`neighbors.py`):
+
+* **Parts profile.** Models that use the same part numbers share a platform and size class.
+* **Work profile.** Models with the same kinds of work are the same machine type: stick, swing, thumb and tracks mean excavator.
+
+similarity = 0.6 × parts + 0.4 × work, within a make. On your data the 50G's neighbours are **60G, 35G, 50P, 30G, 60P, 35P, 26G, 50D**, all compact excavators. Every model's list is in `data/review/similar_machines.csv`. To pin a group, add it to `config/machine_types.csv`; it ships with JD compact excavators. A model with a pinned type only gets neighbours of the same type.
+
+How a quote climbs: **model → series → base → similar machines → make + division → division → all**. Two rules keep big machines from setting the price for small ones:
+
+1. **Similar machines come before the broad levels.** A 50G arm-cylinder job uses 50G history, then its siblings, and only then everything else.
+2. **Broad history is scaled to the machine class.** When the broad levels are needed, they are first multiplied by a class factor. The factor is measured on jobs the class shares with the broad group. The job being quoted counts most (for cylinder work, 3.6 h on 50G-class machines vs 6.5 h on JD C&F), shrunk toward the median over all shared job types. For example, JD 50G arm cylinder replace has no 50G-class history; it comes out at **2.5 h** (31 jobs on other C&F machines × 0.57) instead of 6.7 h. Big machines get factors above 1 (350GLC ×1.5 on cylinder reseals). Busy models with their own history are hardly affected.
+
+The response lists `machine.similar_machines`, and each labour line has `similar_machines_used` and `scaled_to_machine_class`. The page shows both, so the estimator can see where the hours came from.
 
 ## Production
 
@@ -199,6 +216,7 @@ Use `--force` only when the change is intended. Every build writes `data/review/
 | `config/synonyms.csv` | Phrases that mean the same job for the context match (valve lash = valve set = valve clearance) |
 | `config/symptoms.csv` | Symptom patterns (NO_START, HYD_LEAK, …) |
 | `config/make_aliases.csv` · `config/model_aliases.csv` | Make / model spellings that mean the same machine |
+| `config/machine_types.csv` | Pin models to a machine type (e.g. JD compact excavators); similar machines stay within the type |
 | env vars (`QS_*`, see `src/quote_system/config.py`) | Thresholds: shrinkage k, kit attach rates, outlier cut-off, excluded sales types |
 
 The pipeline writes `part_taxonomy` (with `source` = rule / rule_verified / text_vote / override) into the database. You can review it with:
@@ -215,6 +233,7 @@ src/quote_system/
   ingest.py              Excel/CSV → parquet (header detection, column aliases)
   validate.py            refuse bad exports, data-quality report, build manifest
   normalize.py           make / model standardisation (aliases, evidence-based merges, series level)
+  neighbors.py           similar machines learned from parts + work history
   labeling.py            part taxonomy + segment job labelling
   stats.py               labour stats, kits, symptom tables
   pipeline.py            orchestrates the above → data/quote.duckdb

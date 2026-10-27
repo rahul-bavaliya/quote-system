@@ -253,3 +253,26 @@ def test_bad_export_never_replaces_good_statistics(built, tmp_path):
         validate(s.work_dir / "workorders.parquet", s.work_dir / "parts.parquet", s, prev * 2)
     report = (built["settings"].db_path.parent / "review" / "data_quality.md").read_text()
     assert "Make / model standardisation" in report
+
+
+def test_similar_machines_learned_and_used(client, built):
+    con = duckdb.connect(str(built["settings"].db_path), read_only=True)
+    nb = {r[0] for r in con.execute("select neighbor from model_neighbors where make='JD' and model='333G'").fetchall()}
+    assert "333P" in nb                                   # same platform: shares parts and work
+    review = built["settings"].db_path.parent / "review" / "similar_machines.csv"
+    assert review.exists()
+    q = client.post("/quotes", json={"make": "JD", "model": "333G", "job_codes": ["BATTERY"]}).json()
+    assert any(x["model"] == "333P" for x in q["machine"]["similar_machines"])
+    assert "similar" in {b["level"] for b in q["labor"][0]["basis"]}
+    # a model never seen borrows the similar machines of its series / base
+    q = client.post("/quotes", json={"make": "JD", "model": "333X", "job_codes": ["STARTER"]}).json()
+    assert q["machine"]["known_model"] is False and q["machine"]["similar_machines"]
+
+
+def test_class_factor_is_bounded(built):
+    from quote_system.engine import QuoteEngine
+
+    e = QuoteEngine(built["settings"])
+    m = e.machine("JD", "333G")
+    cf = e.class_factor(m, "make_div", ["BATTERY"])
+    assert cf is None or 0.3 <= cf["factor"] <= 3.0

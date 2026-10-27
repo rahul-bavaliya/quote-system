@@ -19,6 +19,7 @@ from .config import Settings, get_settings
 from .ingest import ingest
 from .labeling import classify_parts, label_segments
 from .logging_setup import setup_logging
+from .neighbors import build_neighbors
 from .normalize import standardize
 from .rules import load_jobs, pm_job_codes
 from .stats import LOCATION_SQL, build_stats
@@ -72,12 +73,14 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
     labelling = label_segments(con, settings)
     log.info("labelling done in %.1fs", time.time() - t0)
     meta = build_stats(con, settings, cutoff=cutoff)
+    meta["similar_machines"] = build_neighbors(con, settings)
     meta["standardisation"] = norm_stats
     meta["validation"] = validation
     manifest = {"built_at": meta["built_at"], "version": settings.version, "cutoff": cutoff,
                 "inputs": input_manifest(settings.raw_dir) if not cutoff else [], "max_hours": settings.max_hours,
                 "standardisation": norm_stats, "labelling": labelling, "validation": validation}
-    for k, v in (("standardisation", norm_stats), ("validation", validation), ("labelling", labelling),
+    for k, v in (("similar_machines", meta["similar_machines"]), ("standardisation", norm_stats),
+                 ("validation", validation), ("labelling", labelling),
                  ("manifest", manifest)):
         con.execute("insert into meta values (?, ?)", [k, json.dumps(v, default=str)])
     log.info("stats done in %.1fs", time.time() - t0)

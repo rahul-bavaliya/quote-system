@@ -12,3 +12,4 @@ pattern,replacement,note
 "\bCUTTING EDGES?\b|\bCUTING EDGES?\b",CUTTINGEDGE,
 "\bSEAT ?BELTS?\b",SEATBELT,
 "\bOIL CHANGE\b|\bCHANGE (THE )?OIL\b|\bVIDANGE\b",OILCHANGE,
+"(?<!LIFT )(?<!LOADER )\b(ARM|STICK|DIPPER) ?CYL\w*|\bCYLINDRE (DE |D')?(STICK|BRAS)\b|\bSTICK CYLINDRE\b",ARMCYLINDER,excavator arm cylinder = stick cylinder (not loader lift arm)
