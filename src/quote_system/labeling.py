@@ -14,6 +14,7 @@ import logging
 
 import duckdb
 import pandas as pd
+import pyarrow as pa
 
 from .config import Settings
 from .rules import MODIFIER_JOBS, PM_INTERVAL_RE, PM_INTERVALS, load_component_rules, load_jobs, load_overrides, load_symptoms
@@ -112,7 +113,8 @@ def classify_parts(con: duckdb.DuckDBPyConnection, settings: Settings) -> pd.Dat
         pr.loc[m, ["role", "component", "source"]] = [o["role"].strip(), (o.get("component") or "").strip(), "override"]
 
     out = pr[["part_number", "description", "role", "component", "source", "evidence_share", "n_segments", "lines", "rule"]]
-    con.register("part_tax_df", out)
+    # hand over as Arrow: older DuckDB builds cannot read pandas 3 "str" columns directly
+    con.register("part_tax_df", pa.Table.from_pandas(out, preserve_index=False))
     con.execute("create or replace table part_taxonomy as select * from part_tax_df")
     con.unregister("part_tax_df")
     log.info("taxonomy: %s", out.groupby("role").size().to_dict())

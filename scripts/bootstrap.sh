@@ -28,6 +28,24 @@ pick_python() {
   return 1
 }
 
+# GitHub's Codespaces *recovery container* is Alpine Linux (musl). DuckDB 2.x and scikit-learn have no
+# ready-made packages for it, so pip would compile them from source for an hour or more and usually fail.
+# Stop with clear instructions instead. (QS_ALLOW_SOURCE_BUILD=1 forces the attempt anyway.)
+if { [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; } && [ "${QS_ALLOW_SOURCE_BUILD:-0}" != 1 ]; then
+  cat >&2 <<'MSG'
+
+  This Codespace is running GitHub's recovery container (Alpine Linux), not the project's dev container.
+  The dependencies cannot be installed here in reasonable time.
+
+  Fix: press F1 -> "Codespaces: Rebuild Container" (choose Full Rebuild if asked).
+       If it comes back here again, F1 -> "Codespaces: View Creation Log" shows why the
+       dev container failed to build - send that log.
+  Or:  delete this Codespace and create a new one on this branch.
+
+MSG
+  exit 1
+fi
+
 if [ ! -x .venv/bin/python ] || ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
   BASE=$(pick_python) || {
     echo "No Python 3.11+ found. In Codespaces run 'Codespaces: Rebuild Container' (F1), or install Python 3.12." >&2
