@@ -25,8 +25,9 @@ def _metrics(rows: list[tuple[float, float]]) -> dict:
         "n": len(rows),
         "mae_hours": round(statistics.fmean(err), 2),
         "median_abs_err_hours": round(statistics.median(err), 2),
-        "within_25pct": round(sum(x <= 0.25 for x in ape) / len(ape), 3),
-        "within_50pct": round(sum(x <= 0.50 for x in ape) / len(ape), 3),
+        # jobs with 0 actual hours have no percentage error; None when every row is like that
+        "within_25pct": round(sum(x <= 0.25 for x in ape) / len(ape), 3) if ape else None,
+        "within_50pct": round(sum(x <= 0.50 for x in ape) / len(ape), 3) if ape else None,
     }
 
 

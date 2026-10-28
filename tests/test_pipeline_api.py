@@ -333,3 +333,21 @@ def test_make_entries_review_list(client):
     assert ("JHONDEERE", "JD", "fuzzy") in got
     assert ("Komatsoo", "KOMATSOO", "unknown") in got
     assert "JHONDEERE,JD," in r.json()["make_aliases_csv"]
+
+
+def test_backtest_metrics_all_zero_actuals():
+    from quote_system.backtest import _metrics
+    m = _metrics([(1.5, 0.0), (2.0, 0.0)])
+    assert m["n"] == 2 and m["within_25pct"] is None and m["within_50pct"] is None
+
+
+def test_failed_build_cleans_up_and_releases_file(built, tmp_path, monkeypatch):
+    import pytest as _pytest
+
+    from quote_system import pipeline
+    out = tmp_path / "x.duckdb"
+    monkeypatch.setattr(pipeline, "classify_parts", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    with _pytest.raises(RuntimeError, match="boom"):
+        pipeline.build_database(built["settings"], out, skip_ingest=True)
+    assert not out.exists()
+    assert not out.with_suffix(".building.duckdb").exists()   # temp file removed, nothing locked

@@ -59,70 +59,80 @@ def build_database(settings: Settings, db_path: Path, cutoff: str | None = None,
         if p.exists():
             p.unlink()
     con = duckdb.connect(str(tmp))
-    threads = os.environ.get("QS_THREADS")
-    if threads:
-        con.execute(f"set threads = {int(threads)}")
-    con.execute(f"create table workorders as select * from '{wo}'")
-    con.execute(f"create table parts as select * from '{parts}'")
-    _load_job_catalog(con, settings)
-    norm_stats = standardize(con, settings)
-    log.info("make/model standardisation: %s", norm_stats)
+    idx_tmp: Path | None = None
+    ok = False
+    try:
+        threads = os.environ.get("QS_THREADS")
+        if threads:
+            con.execute(f"set threads = {int(threads)}")
+        con.execute("create table workorders as select * from read_parquet(?)", [str(wo)])
+        con.execute("create table parts as select * from read_parquet(?)", [str(parts)])
+        _load_job_catalog(con, settings)
+        norm_stats = standardize(con, settings)
+        log.info("make/model standardisation: %s", norm_stats)
 
-    classify_parts(con, settings)
-    log.info("taxonomy done in %.1fs", time.time() - t0)
-    labelling = label_segments(con, settings)
-    log.info("labelling done in %.1fs", time.time() - t0)
-    meta = build_stats(con, settings, cutoff=cutoff)
-    meta["similar_machines"] = build_neighbors(con, settings)
-    meta["standardisation"] = norm_stats
-    meta["validation"] = validation
-    manifest = {"built_at": meta["built_at"], "version": settings.version, "cutoff": cutoff,
-                "inputs": input_manifest(settings.raw_dir) if not cutoff else [], "max_hours": settings.max_hours,
-                "standardisation": norm_stats, "labelling": labelling, "validation": validation}
-    for k, v in (("similar_machines", meta["similar_machines"]), ("standardisation", norm_stats),
-                 ("validation", validation), ("labelling", labelling),
-                 ("manifest", manifest)):
-        con.execute("insert into meta values (?, ?)", [k, json.dumps(v, default=str)])
-    log.info("stats done in %.1fs", time.time() - t0)
+        classify_parts(con, settings)
+        log.info("taxonomy done in %.1fs", time.time() - t0)
+        labelling = label_segments(con, settings)
+        log.info("labelling done in %.1fs", time.time() - t0)
+        meta = build_stats(con, settings, cutoff=cutoff)
+        meta["similar_machines"] = build_neighbors(con, settings)
+        meta["standardisation"] = norm_stats
+        meta["validation"] = validation
+        manifest = {"built_at": meta["built_at"], "version": settings.version, "cutoff": cutoff,
+                    "inputs": input_manifest(settings.raw_dir) if not cutoff else [], "max_hours": settings.max_hours,
+                    "standardisation": norm_stats, "labelling": labelling, "validation": validation}
+        for k, v in (("similar_machines", meta["similar_machines"]), ("standardisation", norm_stats),
+                     ("validation", validation), ("labelling", labelling),
+                     ("manifest", manifest)):
+            con.execute("insert into meta values (?, ?)", [k, json.dumps(v, default=str)])
+        log.info("stats done in %.1fs", time.time() - t0)
 
-    # context search: every segment with usable hours, labelled or not ('VALVE LASH ADJUSTMENT' has no job code)
-    con.execute(f"""
-        create or replace table text_pool as
-        select service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
-               make, model, base_model, division, actual_hours, eq_hours, job_key, series, {LOCATION_SQL} as location,
-               model_raw
-        from scoped where actual_hours > 0 and actual_hours <= {settings.max_hours} and norm_text <> ''
-    """)
-    con.execute("create index if not exists ix_pool_text on text_pool (norm_text)")
-    # parts-based matching: how much each part number tells you about the job (idf) and per-segment norms
-    con.execute("""
-        create or replace temp table seg_parts as
-        select distinct p.service_order_id, p.part_number
-        from parts p join text_pool t using (service_order_id) join part_taxonomy x using (part_number)
-        where x.role <> 'fee';
-        create or replace table part_idf as
-        with n as (select count(distinct service_order_id) as total from seg_parts)
-        select part_number, regexp_replace(part_number, '[^A-Z0-9]', '', 'g') as pn_key, count(*) as segs,
-               ln(any_value(n.total) / count(*)) + 1 as idf
-        from seg_parts, n group by part_number;
-        create or replace table seg_part_norm as
-        select s.service_order_id, sqrt(sum(i.idf * i.idf)) as norm, count(*) as n_parts
-        from seg_parts s join part_idf i using (part_number) group by 1;
-        create index if not exists ix_parts_pn on parts (part_number);
-    """)
-    texts = con.execute("select norm_text, count(*) from text_pool group by 1 order by 1").fetchall()
-    idx_tmp = index_dir_for(db_path).with_name(index_dir_for(db_path).name + ".building")
-    shutil.rmtree(idx_tmp, ignore_errors=True)
-    meta["text_index"] = build_index([t for t, _ in texts], [n for _, n in texts], idx_tmp)
-    con.execute("insert into meta values ('text_index', ?)", [json.dumps(meta["text_index"])])
-    log.info("text index %s, done in %.1fs", meta["text_index"], time.time() - t0)
+        # context search: every segment with usable hours, labelled or not ('VALVE LASH ADJUSTMENT' has no job code)
+        con.execute(f"""
+            create or replace table text_pool as
+            select service_order_id, wo_number, wo_segment, branch, invoice_date, description, norm_text,
+                   make, model, base_model, division, actual_hours, eq_hours, job_key, series, {LOCATION_SQL} as location,
+                   model_raw
+            from scoped where actual_hours > 0 and actual_hours <= {settings.max_hours} and norm_text <> ''
+        """)
+        con.execute("create index if not exists ix_pool_text on text_pool (norm_text)")
+        # parts-based matching: how much each part number tells you about the job (idf) and per-segment norms
+        con.execute("""
+            create or replace temp table seg_parts as
+            select distinct p.service_order_id, p.part_number
+            from parts p join text_pool t using (service_order_id) join part_taxonomy x using (part_number)
+            where x.role <> 'fee';
+            create or replace table part_idf as
+            with n as (select count(distinct service_order_id) as total from seg_parts)
+            select part_number, regexp_replace(part_number, '[^A-Z0-9]', '', 'g') as pn_key, count(*) as segs,
+                   ln(any_value(n.total) / count(*)) + 1 as idf
+            from seg_parts, n group by part_number;
+            create or replace table seg_part_norm as
+            select s.service_order_id, sqrt(sum(i.idf * i.idf)) as norm, count(*) as n_parts
+            from seg_parts s join part_idf i using (part_number) group by 1;
+            create index if not exists ix_parts_pn on parts (part_number);
+        """)
+        texts = con.execute("select norm_text, count(*) from text_pool group by 1 order by 1").fetchall()
+        idx_tmp = index_dir_for(db_path).with_name(index_dir_for(db_path).name + ".building")
+        shutil.rmtree(idx_tmp, ignore_errors=True)
+        meta["text_index"] = build_index([t for t, _ in texts], [n for _, n in texts], idx_tmp)
+        con.execute("insert into meta values ('text_index', ?)", [json.dumps(meta["text_index"])])
+        log.info("text index %s, done in %.1fs", meta["text_index"], time.time() - t0)
 
-    # keep the serving db lean: raw tables are in parquet already
-    for t in ("workorders", "eligible", "scoped", "hours_sample", "part_desc", "part_rule"):
-        con.execute(f"drop table if exists {t}")
-    con.execute("create index if not exists ix_seg_job on segments (job_key, make, model)")
-    con.execute("checkpoint")
-    con.close()
+        # keep the serving db lean: raw tables are in parquet already
+        for t in ("workorders", "eligible", "scoped", "hours_sample", "part_desc", "part_rule"):
+            con.execute(f"drop table if exists {t}")
+        con.execute("create index if not exists ix_seg_job on segments (job_key, make, model)")
+        con.execute("checkpoint")
+        ok = True
+    finally:
+        con.close()  # always release the file, even when a step fails
+        if not ok:   # a failed build leaves nothing behind; the live database is untouched
+            for f in (tmp, Path(str(tmp) + ".wal")):
+                f.unlink(missing_ok=True)
+            if idx_tmp is not None:
+                shutil.rmtree(idx_tmp, ignore_errors=True)
     shutil.move(str(tmp), str(db_path))  # atomic swap so a running API never sees a half-built db
     final_idx = index_dir_for(db_path)
     shutil.rmtree(final_idx, ignore_errors=True)
