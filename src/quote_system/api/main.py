@@ -64,6 +64,16 @@ def load_engine() -> None:
         state.store = QuoteStore(s.quotes_db_path)
 
 
+def check_keys(api_keys: list[str], admin_key: str) -> None:
+    """Refuse to start with the placeholder keys from .env.example; warn about short ones."""
+    keys = api_keys + ([admin_key] if admin_key else [])
+    if any("change-me" in k.lower() for k in keys):
+        raise RuntimeError("QS_API_KEYS / QS_ADMIN_KEY still hold the placeholder from .env.example. Generate real keys: "
+                           "python -c \"import secrets;print(secrets.token_urlsafe(32))\"")
+    if any(len(k) < 16 for k in keys):
+        log.warning("an API or admin key is shorter than 16 characters - use long random keys in production")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     s = get_settings()
@@ -72,6 +82,7 @@ async def lifespan(_: FastAPI):
     state.admin_key = s.admin_key.strip()
     if not state.api_keys:
         log.warning("QS_API_KEYS is not set - the API is open to anyone who can reach it (fine for local dev only)")
+    check_keys(state.api_keys, state.admin_key)
     load_engine()
     yield
 
@@ -129,7 +140,8 @@ def require_admin(x_admin_key: str | None = Header(None), x_api_key: str | None 
 
 # ---------------------------------------------------------------- schemas
 class QuoteRequest(BaseModel):
-    make: str = Field(..., min_length=1, max_length=60, examples=["John Deere"])
+    make: str = Field("", max_length=60, examples=["John Deere"],
+                      description="Any spelling (JD, John Deere, Deere ...). May be left blank when only one make has the model.")
     model: str = Field(..., min_length=1, max_length=60, examples=["135G LC"])
     job_text: str | None = Field(None, max_length=300,
                                  description="Free text, e.g. 'replace battery' or 'valve lash adjustment'",
@@ -224,7 +236,7 @@ def models(make: str | None = Query(None, max_length=60), q: str = Query("", max
 
 
 @app.get("/machines/resolve")
-def resolve_machine(make: str = Query(..., max_length=60), model: str = Query(..., max_length=60)):
+def resolve_machine(make: str = Query("", max_length=60), model: str = Query(..., max_length=60)):
     """How a make/model as typed is understood: 'John Deere' '135G LC' -> JD 135GLC, series 135G."""
     return engine().machine(make, model).as_dict()
 
@@ -306,7 +318,7 @@ def parts_lookup(part_numbers: str = Query(..., max_length=2000)):
 
 
 @app.get("/similar")
-def similar(q: str = Query(..., max_length=300), make: str = Query(..., max_length=60),
+def similar(q: str = Query(..., max_length=300), make: str = Query("", max_length=60),
             model: str = Query(..., max_length=60), include_parts: bool = True, location: str | None = None):
     """Context search only: past segments whose description means the same as `q`, with hours and parts."""
     e = engine()
@@ -318,6 +330,18 @@ def similar(q: str = Query(..., max_length=300), make: str = Query(..., max_leng
     if not r:
         raise HTTPException(404, f"no past work matches '{q}'")
     return r
+
+
+@app.get("/admin/make-entries", dependencies=[Depends(require_admin)], tags=["ops"])
+def make_entries(limit: int = Query(200, ge=1, le=2000)):
+    """Make spellings typed into quotes that were guessed (word / fuzzy / from_model) or not recognised.
+
+    Review this list now and then: confirm a guess or fix it by adding `alias,canonical` lines to
+    config/make_aliases.csv, then rebuild. Each confirmed spelling is then matched exactly."""
+    rows = state.store.make_entries(limit)
+    return {"entries": rows,
+            "make_aliases_csv": [f"{r['entered'].upper()},{r['read_as']}," for r in rows
+                                 if r["how"] in ("word", "fuzzy", "from_model") and r["entered"]]}
 
 
 @app.get("/quotes/{quote_id}")

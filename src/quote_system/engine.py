@@ -70,12 +70,26 @@ class Machine:
              "series": self.series, "base_model": self.base_model, "division": self.division,
              "known_model": self.known_model,
              "similar_machines": [{"model": md, "similarity": round(s, 2)} for md, s in self.neighbors]}
-        if self.make_input and (normalize_text(self.make_input) != self.make or self.make_resolution != "exact"):
+        if self.make_resolution != "exact" or (self.make_input and normalize_text(self.make_input) != self.make):
             d["make_entered"] = self.make_input
             d["make_resolved_by"] = self.make_resolution
         if self.model_input and normalize_text(self.model_input) != (self.display_model or self.model):
             d["model_entered"] = self.model_input
         return d
+
+    def input_warnings(self) -> list[str]:
+        """Warnings about how the make was read, shown at the top of every quote."""
+        how, entered = self.make_resolution, (self.make_input or "").strip()
+        if how == "from_model":
+            what = f"'{entered}' is not a known make" if entered else "No make given"
+            return [f"{what}; read as {self.make} because only {self.make} has model {self.model} in history - check."]
+        if how in ("word", "fuzzy"):
+            return [f"Make '{entered}' read as {self.make} (closest known spelling) - check."]
+        if how in ("unknown", "empty"):
+            what = f"Make '{entered}' is not in history" if entered else "No make given"
+            return [f"{what}; this quote uses division / all-make history only, so it is broad. "
+                    "Pick a make from /makes, or add the spelling to config/make_aliases.csv."]
+        return []
 
 
 def _wquantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
@@ -133,8 +147,13 @@ class QuoteEngine:
             for mk, md, ser, base, div, n, disp in
             c.execute("select make, model, series, base_model, division, n_segments, display_model from models").fetchall()}
         make_totals: dict[str, int] = {}
-        for (mk, _), v in self.models.items():
+        self.model_makes: dict[str, set[str]] = {}    # model key -> makes that have it (to infer a missing make)
+        self.series_makes: dict[str, set[str]] = {}
+        for (mk, md), v in self.models.items():
             make_totals[mk] = make_totals.get(mk, 0) + v["n"]
+            if mk not in ("UNKNOWN", "MISC", "SHOP"):
+                self.model_makes.setdefault(md, set()).add(mk)
+                self.series_makes.setdefault(v["series"], set()).add(mk)
         make_map = dict(c.execute("select raw_clean, canonical from make_map").fetchall())
         self.neighbors: dict[tuple[str, str], list[tuple[str, float]]] = {}
         try:
@@ -162,6 +181,13 @@ class QuoteEngine:
         """'John Deere' / '135G LC' -> JD / 135GLC (series 135G, base 135), same rules as the pipeline."""
         mk, how = self.makes_resolver.resolve(make)
         md = model_key(model)
+        if how in ("unknown", "empty") and md != "UNKNOWN":
+            # make missing or unreadable: if only one make has this model (or series) in history, use it
+            ser0 = series_of(md)
+            for owners in (self.model_makes.get(md), self.series_makes.get(ser0)):
+                if owners and len(owners) == 1:
+                    mk, how = next(iter(owners)), "from_model"
+                    break
         hit = self.models.get((mk, md))
         if hit:
             return Machine(mk, md, hit["series"], hit["base"], division or hit["division"], True, hit["display"],
@@ -525,7 +551,7 @@ class QuoteEngine:
         parts = [self.parts_kit(j, m) for j in jobs] if include_parts else []
         key = "+".join(sorted(jobs))
         evidence = self.similar(key, m) or (self.similar(jobs[0], m) if jobs else [])
-        warnings = []
+        warnings = m.input_warnings()
         if not m.known_model:
             warnings.append(f"Model {m.model} not in history; using series {m.series} / base model {m.base_model} / division {m.division}.")
         if missing:
@@ -691,7 +717,7 @@ class QuoteEngine:
                                           key=lambda w: w["invoice_date"], reverse=True)[:8],
             "parts_query": known, "unknown_parts": unknown,
             "inferred_jobs": [{"job_code": c, "display_name": self.catalog.get(c, {}).get("display_name", c)} for c, _ in subs],
-            "warnings": warnings + [w for _, sub in subs for w in sub["warnings"]],
+            "warnings": list(dict.fromkeys(warnings + [w for _, sub in subs for w in sub["warnings"]])),
         }
 
     def _parts_pool(self, known: list[dict], unknown: list, m: Machine, include_parts: bool,
@@ -908,7 +934,7 @@ class QuoteEngine:
                      "model": r[15] or r[8], "location": LOCATIONS.get(r[14]),
                      "match_score": round(weights.get(r[0], 0), 3)} for r in recent]
         parts = [self._kit_from_segments([r[0] for r in pool], spec)] if include_parts else []
-        warnings = []
+        warnings = m.input_warnings()
         if not m.known_model:
             warnings.append(f"Model {m.model} not in history; using series {m.series} / base model {m.base_model} / division {m.division}.")
         if location and main is allb:

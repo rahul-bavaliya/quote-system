@@ -53,6 +53,20 @@ class QuoteStore:
             self.db.commit()
         return cur.rowcount > 0
 
+    def make_entries(self, limit: int = 200) -> list[dict]:
+        """Make spellings that were not an exact/alias match, most frequent first."""
+        with self._lock:
+            rows = self.db.execute("""
+                select coalesce(json_extract(response, '$.machine.make_entered'), '') as entered,
+                       json_extract(response, '$.machine.make') as read_as,
+                       json_extract(response, '$.machine.make_resolved_by') as how,
+                       count(*), max(created_at)
+                from quotes
+                where json_extract(response, '$.machine.make_resolved_by')
+                      in ('word', 'fuzzy', 'from_model', 'unknown', 'empty')
+                group by 1, 2, 3 order by 4 desc, 5 desc limit ?""", (limit,)).fetchall()
+        return [{"entered": e, "read_as": r, "how": h, "quotes": n, "last_seen": ls} for e, r, h, n, ls in rows]
+
     def accuracy(self) -> dict:
         with self._lock:
             return self._accuracy()

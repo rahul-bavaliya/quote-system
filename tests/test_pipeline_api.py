@@ -288,3 +288,48 @@ def test_work_orders_shown_only_for_searched_model(client):
     # a model with no history shows no other machines' work orders (hours still come from similar machines)
     q = client.post("/quotes", json={"make": "JD", "model": "333X", "job_codes": ["STARTER"]}).json()
     assert q["similar_work_orders"] == [] and q["total"]["p50_hours"] > 0
+
+
+def test_messy_make_entries_resolve_with_warning(client):
+    for entered, how in (("JHONDEERE", "fuzzy"), ("Jhon Deere", "word"), ("Deere & Co", "word"), ("JOHN DEER", "word")):
+        r = client.get("/machines/resolve", params={"make": entered, "model": "333 G"})
+        assert r.status_code == 200 and r.json()["make"] == "JD" and r.json()["make_resolved_by"] == how, r.text
+    q = client.post("/quotes", json={"make": "Jhon Deere", "model": "333G", "job_codes": ["BATTERY"]}).json()
+    assert q["machine"]["make"] == "JD" and q["labor"][0]["level_used"] == "model"
+    assert any("closest known spelling" in w for w in q["warnings"])
+
+
+def test_make_inferred_from_model(client):
+    for entered in ("", "Komatsoo"):
+        q = client.post("/quotes", json={"make": entered, "model": "333G", "job_codes": ["BATTERY"]}).json()
+        assert q["machine"]["make"] == "JD" and q["machine"]["make_resolved_by"] == "from_model", q["machine"]
+        assert q["labor"][0]["level_used"] == "model"
+        assert any("only JD has model 333G" in w for w in q["warnings"])
+
+
+def test_unknown_make_and_model_warns(client):
+    q = client.post("/quotes", json={"make": "Komatsoo", "model": "PC138", "job_codes": ["BATTERY"]}).json()
+    assert q["machine"]["make_resolved_by"] == "unknown"
+    assert any("not in history" in w and "Komatsoo" in w for w in q["warnings"])
+
+
+def test_placeholder_keys_refused():
+    import pytest as _pytest
+
+    from quote_system.api.main import check_keys
+    with _pytest.raises(RuntimeError, match="placeholder"):
+        check_keys(["change-me-long-random-key"], "")
+    with _pytest.raises(RuntimeError, match="placeholder"):
+        check_keys(["a" * 40], "change-me-admin-key")
+    check_keys(["a" * 40], "b" * 40)   # real keys start fine
+
+
+def test_make_entries_review_list(client):
+    client.post("/quotes", json={"make": "JHONDEERE", "model": "333G", "job_codes": ["BATTERY"]})
+    client.post("/quotes", json={"make": "Komatsoo", "model": "PC138", "job_codes": ["BATTERY"]})
+    r = client.get("/admin/make-entries")
+    assert r.status_code == 200, r.text
+    got = {(e["entered"], e["read_as"], e["how"]) for e in r.json()["entries"]}
+    assert ("JHONDEERE", "JD", "fuzzy") in got
+    assert ("Komatsoo", "KOMATSOO", "unknown") in got
+    assert "JHONDEERE,JD," in r.json()["make_aliases_csv"]

@@ -41,3 +41,21 @@ def test_request_time_make_resolution():
     assert r.resolve("Hitachi") == ("HIT", "prefix")
     assert r.resolve("cat")[0] == "CAT"
     assert r.resolve("Nobody")[1] == "unknown"
+
+
+def test_request_time_typos_and_extra_words():
+    r = MakeResolver({"JDE": "JD", "HITAC": "HIT"}, {"JD": 1000, "HIT": 300, "CAT": 200}, CFG)
+    assert r.resolve("Deere & Co") == ("JD", "word")          # a known alias word inside the entry
+    assert r.resolve("JOHN DEER") == ("JD", "word")
+    assert r.resolve("Jhon Deere") == ("JD", "word")          # DEERE is a known word
+    assert r.resolve("JHONDEERE") == ("JD", "fuzzy")          # 2 letters swapped
+    assert r.resolve("JDEERE") == ("JD", "fuzzy")
+    assert r.resolve("")[1] == "empty"
+    assert r.resolve("Komatsoo")[1] == "unknown"              # nothing close: never guessed
+    assert r.resolve("CO")[1] == "unknown"                    # too short to guess
+
+
+def test_fuzzy_tie_is_not_guessed():
+    # 'ABCE' is one letter from both ABCD and ABCF: two different makes, so no guess
+    r = MakeResolver({}, {"ABCD": 100, "ABCF": 100}, CFG)
+    assert r.resolve("ABCE")[1] == "unknown"

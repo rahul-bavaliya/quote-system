@@ -151,16 +151,35 @@ def _edit_distance(a: str, b: str) -> int:
 
 
 class MakeResolver:
-    """Request-time make resolution: 'John Deere', 'jd', 'Deere' -> 'JD'."""
+    """Request-time make resolution: 'John Deere', 'jd', 'Deere' -> 'JD'.
+
+    Order (first hit wins): exact -> alias file -> spelling seen in history -> prefix (HITACHI -> HIT)
+    -> word (a known make/alias word inside the entry: 'DEERE & CO' -> JD)
+    -> fuzzy (closest known spelling within 1-2 letters: 'JHON DEERE', 'JDEERE' -> JD).
+    'word' and 'fuzzy' are guesses, so a quote shows a warning for them; a tie between two different
+    makes is never guessed and stays 'unknown'."""
+
+    GUESSED = ("word", "fuzzy", "from_model")
 
     def __init__(self, make_map: dict[str, str], known: dict[str, int], config_dir: str):
         self.map = make_map            # cleaned spelling seen in history -> canonical
         self.known = known             # canonical -> segments
         self.aliases = load_make_aliases(config_dir)
+        # every spelling we know -> canonical, for word and fuzzy matching
+        self.spellings: dict[str, str] = {}
+        for k in known:
+            self.spellings[k] = k
+        for s, canon in self.map.items():
+            self.spellings.setdefault(s, canon)
+        for s, a in self.aliases.items():
+            self.spellings.setdefault(s, self.map.get(a, a))
+        self.spellings.pop("UNKNOWN", None)
 
-    def resolve(self, raw: str) -> tuple[str, str]:
+    def resolve(self, raw: str | None) -> tuple[str, str]:
         """Returns (canonical make, how it was resolved)."""
         c = clean_make(raw)
+        if c == "UNKNOWN":
+            return c, "empty"
         if c in self.known:
             return c, "exact"
         if c in self.aliases:
@@ -172,7 +191,35 @@ class MakeResolver:
         for k in sorted(self.known, key=lambda k: -self.known[k]):  # 'HITACHI' -> HIT, 'TOYOTA' -> TOYOT
             if len(k) >= 3 and (squashed.startswith(k) or (len(squashed) >= 3 and k.startswith(squashed))):
                 return k, "prefix"
+        hit = self._by_word(c)
+        if hit:
+            return hit, "word"
+        hit = self._fuzzy(squashed)
+        if hit:
+            return hit, "fuzzy"
         return c, "unknown"
+
+    def _by_word(self, c: str) -> str | None:
+        """'DEERE & CO', 'JOHN DEER' -> JD: a word of the entry is itself a known make or alias."""
+        found = {self.spellings[w] for w in c.split() if len(w) >= 4 and w in self.spellings}
+        return found.pop() if len(found) == 1 else None
+
+    def _fuzzy(self, squashed: str) -> str | None:
+        """Closest known spelling, at most 1 edit (short words) or 2 edits (8+ letters)."""
+        if len(squashed) < 4:
+            return None
+        limit = 2 if len(squashed) >= 8 else 1
+        best_d, found = limit + 1, set()
+        for s, canon in self.spellings.items():
+            s2 = s.replace(" ", "")
+            if len(s2) < 4:
+                continue
+            d = _edit_distance(squashed, s2)
+            if d < best_d:
+                best_d, found = d, {canon}
+            elif d == best_d:
+                found.add(canon)
+        return found.pop() if best_d <= limit and len(found) == 1 else None
 
 
 def standardize(con, settings) -> dict:

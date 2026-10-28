@@ -28,7 +28,7 @@ Quote labour hours and a parts kit for a job (e.g. **Battery R&R on a JD 333G**)
    ```
 4. Optional:
    ```bash
-   make test         # 15 tests on synthetic data - no company data needed
+   make test         # 41 tests on synthetic data - no company data needed
    make backtest     # learn from data before 2026-01-01, score quotes on later jobs
    make demo         # try everything on generated sample data
    ```
@@ -88,6 +88,7 @@ curl -s -X POST localhost:8000/quotes -H 'content-type: application/json' \
 | GET | `/diagnose?symptom=no start&make=JD&model=333G` | Which repairs usually fix a symptom |
 | GET | `/jobs?q=batt` · `/makes` · `/models?make=JD&q=333` | Search / autocomplete |
 | GET | `/machines/resolve?make=John Deere&model=135G LC` | How a make/model entry is standardised |
+| GET | `/admin/make-entries` (header `X-Admin-Key`) | Make spellings typed into quotes that were guessed or unknown, for the alias file |
 | GET | `/health` (liveness) · `/ready` (data loaded) · `/version` · `/meta` · `/accuracy` | Operations |
 | POST | `/admin/reload` (header `X-Admin-Key`) | Reload after re-running the pipeline |
 
@@ -154,6 +155,18 @@ The exports contain the same brand under many spellings: JD, JDE, DEERE, JOHN, "
 3. **Automatic merges, only with evidence.** A rare spelling is folded into a big make only when its machines are that make's models. That means ≥ 50 % model overlap plus a prefix or near-spelling relationship (JDE → JD, HITAC → HIT), or ≥ 80 % overlap for small spellings. Notes typed into the make field on JD models ("SALES", "EXP", "2024") end up under JD this way. Short unrelated codes are left alone.
 4. **Review.** Each build writes `data/review/make_mapping.csv`, listing every merged spelling with its method, segment count and model overlap. It also writes `model_variants.csv`, listing every model written more than one way. If a decision is wrong, add a line to the alias files and rebuild.
 
+**What people type when quoting** goes through the same rules plus two more, because a quote on the wrong make drops to all-make history:
+
+| Typed | Read as | How (`make_resolved_by`) |
+|---|---|---|
+| `John Deere`, `JOHND`, `J.D.` | JD | `alias` (config/make_aliases.csv) |
+| `Deere & Co`, `JOHN DEER`, `Jhon Deere` | JD | `word`: one word of the entry is a known make or alias |
+| `JHONDEERE`, `JDEERE` | JD | `fuzzy`: closest known spelling, at most 1 letter off (2 for 8+ letters) |
+| *(blank)* or `Komatsoo` with model `333G` | JD | `from_model`: only one make has that model or series in history |
+| `Komatsoo` with model `PC138` | KOMATSOO | `unknown`: nothing close, never guessed |
+
+A guess is never made when two makes are equally close. Every guessed or unknown make puts a warning at the top of the quote, so the estimator can check it. `GET /admin/make-entries` lists the spellings people typed that were guessed or not recognised, most frequent first, with ready-to-paste `make_aliases.csv` lines. Confirm or correct them there, rebuild, and from then on they match exactly.
+
 Variants are not forced together. **135G and 135GLC stay separate models in the same series (135G)**, so a 135GLC quote uses 135GLC history first and borrows from 135G and then the 135 family only as needed. Requests go through the same rules: "Hitachi" → HIT by prefix, and an unknown model like "135GX" falls back to its series/base. The response shows what was entered and how it was read.
 
 ## Similar machines
@@ -199,11 +212,11 @@ Use `--force` only when the change is intended. Every build writes `data/review/
 
 | Area | What is in place |
 |---|---|
-| Security | API keys (`X-API-Key`, constant-time compare) for every API call; separate admin key for reload; non-root container; no company data in the image (data is a volume; `.dockerignore`/`.gitignore` block exports); input size limits on every field; CORS off unless `QS_CORS_ORIGINS` is set |
+| Security | the API refuses to start with the `change-me` placeholder keys from `.env.example`; API keys (`X-API-Key`, constant-time compare) for every API call; separate admin key for reload; non-root container; no company data in the image (data is a volume; `.dockerignore`/`.gitignore` block exports); input size limits on every field; CORS off unless `QS_CORS_ORIGINS` is set |
 | Observability | JSON logs (`QS_LOG_JSON=1`): one line per request with request id, path, status, latency; `X-Request-ID` echoed back; unhandled errors logged with stack trace, client gets `{"detail":"internal error","request_id":…}` |
 | Health | `/health` liveness (container `HEALTHCHECK`), `/ready` returns 503 until statistics are loaded (use for load balancers), `/version` |
 | Reliability | pinned dependencies (`requirements.lock`); quote log in SQLite WAL mode (safe for several workers); atomic database swap; reload without restart |
-| Quality gates | CI runs ruff and 31 tests, then builds the image and smoke-tests it: pipeline on synthetic data, auth required, a real quote, admin reload |
+| Quality gates | CI runs ruff and 41 tests, then builds the image and smoke-tests it: pipeline on synthetic data, auth required, a real quote, admin reload |
 | Sizing | about 1 GB RAM per API worker (`QS_WORKERS`, default 2) and ~2.5 GB during a build; quotes take 0.05–0.3 s |
 
 **Put HTTPS in front.** Use the company reverse proxy, IIS/ARR, nginx, an Azure App Gateway or similar, and forward to port 8000. The app trusts `X-Forwarded-*` headers from the proxy. For SSO, let the proxy authenticate users, and keep API keys for system-to-system calls.
