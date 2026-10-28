@@ -1,0 +1,2 @@
+make,model_pattern,machine_type,note
+JD,"(17|26|27|30|35|50|60|75|80|85)[A-Z]{1,3}",compact excavator,"JD compact excavators (17G, 26G, 35G, 50G, 60G, 75G, 85G and P/D/C series). Regex matched against the whole model key."

@@ -1,0 +1,26 @@
+# docker compose run --rm pipeline     # build statistics from ./data/raw (about 2-3 min)
+# docker compose up -d api             # serve on http://localhost:8000
+# After a new export: run the pipeline again, then POST /admin/reload (or restart api).
+services:
+  api:
+    build:
+      context: .
+      args:
+        QS_VERSION: ${QS_VERSION:-dev}
+    image: quote-system:${QS_VERSION:-dev}
+    env_file: [.env]
+    ports: ["${PORT:-8000}:8000"]
+    volumes: ["./data:/app/data"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4g          # ~1 GB per worker + headroom
+
+  pipeline:
+    image: quote-system:${QS_VERSION:-dev}
+    build: .
+    env_file: [.env]
+    volumes: ["./data:/app/data"]
+    command: ["python", "-m", "quote_system.pipeline"]
+    profiles: ["tools"]

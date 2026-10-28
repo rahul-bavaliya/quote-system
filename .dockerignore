@@ -1,0 +1,16 @@
+.git
+.github
+.devcontainer
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+data
+*.xlsx
+*.csv
+!config/*.csv
+*.parquet
+*.duckdb
+*.sqlite
+.env
