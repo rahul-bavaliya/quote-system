@@ -5,6 +5,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Only one setup at a time. A Codespace runs this on start-up in the background; `make run` / `make install`
+# typed meanwhile would start a second pip into the same .venv and the two collide. Wait for the first instead.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>.bootstrap.lock
+  if ! flock -n 9; then
+    echo "Setup is already running (the Codespace starts it automatically) - waiting for it to finish..."
+    flock 9
+    if [ -x .venv/bin/python ] && .venv/bin/python scripts/check_deps.py >/dev/null 2>&1; then
+      echo "Ready: set up by the other run."
+      exit 0
+    fi
+  fi
+fi
+
 pick_python() {
   for p in python3.12 python3.13 python3.11 /usr/local/bin/python3 python3 python; do
     if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
@@ -37,8 +51,14 @@ if [ ! -x .venv/bin/python ] || ! .venv/bin/python -m pip --version >/dev/null 2
   fi
 fi
 
+echo "Installing dependencies into .venv - first time takes 2-5 minutes (about 700 MB), progress below."
 .venv/bin/python -m pip install -q --upgrade pip
-.venv/bin/python -m pip install -q -r requirements.lock
+# no -q here: show each package so a long download does not look like a hang
+set +e
+.venv/bin/python -m pip install -r requirements.lock 2>&1 | grep -Ev "^(Requirement already satisfied|  Using cached)"
+rc=${PIPESTATUS[0]}
+set -e
+[ "$rc" -eq 0 ] || { echo "Dependency install failed - see the messages above." >&2; exit 1; }
 .venv/bin/python -m pip install -q --no-deps -e .
 .venv/bin/python -m pip install -q ruff
 echo "Ready: $(.venv/bin/python --version) in .venv  (make pipeline / make run use it automatically)"

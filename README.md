@@ -11,7 +11,7 @@ Quote labour hours and a parts kit for a job (e.g. **Battery R&R on a JD 333G**)
 
 ## Quick start (Codespaces)
 
-1. **Open the Codespace**: *Code → Codespaces → Create codespace on main*. Dependencies install automatically into `.venv` (≈1–2 min). A 2-core / 8 GB machine is enough. Docker is included (for `make docker-build`).
+1. **Open the Codespace**: *Code → Codespaces → Create codespace on main*. Dependencies install automatically into `.venv` (2–5 min, about 700 MB). The Codespace shows *Setting up* until they are done. If you type a `make` command while setup is still running, it says so and waits; let it finish, don't press Ctrl-C. A 2-core / 8 GB machine is enough. Docker is included (for `make docker-build`).
 2. **Add your data.** Company data is never committed (`.gitignore` blocks `*.xlsx`, `*.csv`, `*.parquet`, `*.duckdb`). Put the exports in `data/raw/`:
    ```
    data/raw/workorders.xlsx      # any file starting with "workorder", .xlsx or .csv

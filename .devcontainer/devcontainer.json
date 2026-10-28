@@ -6,6 +6,7 @@
     "ghcr.io/devcontainers/features/docker-in-docker:2": { "moby": false, "dockerDashComposeVersion": "v2" }
   },
   "postCreateCommand": "bash scripts/bootstrap.sh",
+  "waitFor": "postCreateCommand",
   "postStartCommand": "make deps",
   "forwardPorts": [8000],
   "portsAttributes": { "8000": { "label": "Quote API", "onAutoForward": "openBrowser" } },
