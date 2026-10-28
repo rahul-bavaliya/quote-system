@@ -2,9 +2,6 @@
   "name": "quote-system",
   "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
   "hostRequirements": { "cpus": 2, "memory": "8gb" },
-  "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:2": { "moby": false, "dockerDashComposeVersion": "v2" }
-  },
   "postCreateCommand": "bash scripts/bootstrap.sh",
   "waitFor": "postCreateCommand",
   "postStartCommand": "make deps",
